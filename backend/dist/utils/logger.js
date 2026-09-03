@@ -4,6 +4,10 @@ exports.LatencyLogger = void 0;
 class LatencyLogger {
     turns = new Map();
     currentTurnId = null;
+    eventCallback;
+    constructor(eventCallback) {
+        this.eventCallback = eventCallback;
+    }
     startTurn(turnId) {
         this.currentTurnId = turnId;
         this.turns.set(turnId, {
@@ -13,9 +17,8 @@ class LatencyLogger {
         });
         this.logToConsole('info', `🎯 Started conversation turn: ${turnId}`);
     }
-    logEvent(event) {
+    logEvent(event, callback) {
         if (!this.currentTurnId) {
-            console.warn('⚠️  No active turn to log event');
             return;
         }
         const turn = this.turns.get(this.currentTurnId);
@@ -28,6 +31,14 @@ class LatencyLogger {
                 event.durationMs = Number(durationNs) / 1_000_000;
             }
             this.logToConsole('event', this.formatEvent(event));
+            // Send event to frontend in real-time via constructor callback
+            if (this.eventCallback) {
+                this.eventCallback(event);
+            }
+            // Also support passed callback for backwards compatibility
+            if (callback) {
+                callback(event);
+            }
         }
     }
     endTurn() {

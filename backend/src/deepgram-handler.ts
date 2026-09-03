@@ -1,5 +1,6 @@
 import { createClient, LiveTranscriptionEvents } from '@deepgram/sdk';
 import { LatencyLogger } from './utils/logger';
+import { WavEncoder } from './utils/wav-encoder';
 
 export class DeepgramSTTHandler {
   private deepgram: any;
@@ -109,6 +110,7 @@ export class DeepgramTTSHandler {
 
     const startTime = process.hrtime.bigint();
     let firstByteReceived = false;
+    const pcmChunks: Buffer[] = [];
 
     try {
       const response = await fetch(url, {
@@ -134,6 +136,19 @@ export class DeepgramTTSHandler {
 
         if (done) {
           console.log('✅ TTS streaming completed');
+          
+          // Combine all PCM chunks and wrap in WAV format
+          const allPCM = Buffer.concat(pcmChunks);
+          const wavBuffer = WavEncoder.encodeWAV(allPCM, 16000, 1);
+          
+          this.logger.logEvent({
+            eventType: 'audio_encoded_to_wav',
+            timestamp: process.hrtime.bigint(),
+            metadata: { pcmSize: allPCM.length, wavSize: wavBuffer.length },
+          });
+
+          // Send the complete WAV file
+          onChunk(wavBuffer);
           onComplete();
           break;
         }
@@ -155,7 +170,8 @@ export class DeepgramTTSHandler {
           metadata: { audioChunkSize: value.length },
         });
 
-        onChunk(Buffer.from(value));
+        // Accumulate PCM chunks
+        pcmChunks.push(Buffer.from(value));
       }
     } catch (error) {
       console.error('❌ TTS Error:', error);

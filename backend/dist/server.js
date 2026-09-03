@@ -28,10 +28,18 @@ console.log('🚀 Starting Voice Latency Profiler Backend...\n');
 wss.on('connection', async (ws) => {
     const sessionId = `session_${Date.now()}`;
     console.log(`\n🔌 New WebSocket connection: ${sessionId}`);
-    const logger = new logger_1.LatencyLogger();
+    // Create logger with real-time event callback
+    const logger = new logger_1.LatencyLogger((event) => {
+        // Send each event to frontend in real-time
+        sendMessage(ws, {
+            type: 'latency',
+            data: event,
+            timestamp: Date.now(),
+        });
+    });
     const sttHandler = new deepgram_handler_1.DeepgramSTTHandler(process.env.DEEPGRAM_API_KEY, logger);
     const ttsHandler = new deepgram_handler_1.DeepgramTTSHandler(process.env.DEEPGRAM_API_KEY, logger);
-    const llmHandler = new llm_handler_1.LLMHandler(process.env.ANTHROPIC_API_KEY, logger);
+    const llmHandler = new llm_handler_1.LLMHandler(process.env.GROQ_API_KEY, logger);
     connections.set(sessionId, {
         ws,
         logger,

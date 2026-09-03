@@ -4,16 +4,13 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
 };
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.LLMHandler = void 0;
-const sdk_1 = __importDefault(require("@anthropic-ai/sdk"));
+const groq_sdk_1 = __importDefault(require("groq-sdk"));
 class LLMHandler {
-    anthropic;
+    groq;
     logger;
     conversationHistory = [];
     constructor(apiKey, logger) {
-        this.anthropic = new sdk_1.default({
-            apiKey: apiKey,
-            baseURL: 'https://seekai.cc/v1',
-        });
+        this.groq = new groq_sdk_1.default({ apiKey });
         this.logger = logger;
     }
     async getResponse(userMessage) {
@@ -28,22 +25,26 @@ class LLMHandler {
             metadata: { userMessage },
         });
         try {
-            const message = await this.anthropic.messages.create({
-                model: 'claude-opus-4-7',
+            const completion = await this.groq.chat.completions.create({
+                model: 'llama-3.1-70b-versatile', // Fast and high-quality
+                messages: [
+                    {
+                        role: 'system',
+                        content: 'You are a helpful voice assistant. Keep your responses concise and natural, as they will be spoken aloud. Aim for 1-2 sentences unless more detail is specifically requested.',
+                    },
+                    ...this.conversationHistory,
+                ],
+                temperature: 0.7,
                 max_tokens: 150,
-                system: 'You are a helpful voice assistant. Keep your responses concise and natural, as they will be spoken aloud. Aim for 1-2 sentences unless more detail is specifically requested.',
-                messages: this.conversationHistory,
             });
-            const assistantMessage = message.content[0]?.type === 'text'
-                ? message.content[0].text
-                : 'I apologize, but I could not generate a response.';
+            const assistantMessage = completion.choices[0]?.message?.content || 'I apologize, but I could not generate a response.';
             this.logger.logEvent({
                 eventType: 'llm_response_received',
                 timestamp: process.hrtime.bigint(),
                 metadata: {
                     responseText: assistantMessage,
-                    inputTokens: message.usage?.input_tokens,
-                    outputTokens: message.usage?.output_tokens,
+                    model: 'llama-3.1-70b-versatile',
+                    tokensUsed: completion.usage?.total_tokens,
                 },
             });
             this.conversationHistory.push({

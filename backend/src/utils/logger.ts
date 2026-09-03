@@ -3,6 +3,11 @@ import { LatencyEvent, ConversationTurn } from '../types';
 export class LatencyLogger {
   private turns: Map<string, ConversationTurn> = new Map();
   private currentTurnId: string | null = null;
+  private eventCallback?: (event: LatencyEvent) => void;
+
+  constructor(eventCallback?: (event: LatencyEvent) => void) {
+    this.eventCallback = eventCallback;
+  }
 
   startTurn(turnId: string): void {
     this.currentTurnId = turnId;
@@ -14,16 +19,15 @@ export class LatencyLogger {
     this.logToConsole('info', `🎯 Started conversation turn: ${turnId}`);
   }
 
-  logEvent(event: LatencyEvent): void {
+  logEvent(event: LatencyEvent, callback?: (event: LatencyEvent) => void): void {
     if (!this.currentTurnId) {
-      console.warn('⚠️  No active turn to log event');
       return;
     }
 
     const turn = this.turns.get(this.currentTurnId);
     if (turn) {
       turn.events.push(event);
-      
+
       // Calculate duration from previous event
       if (turn.events.length > 1) {
         const prevEvent = turn.events[turn.events.length - 2];
@@ -32,6 +36,16 @@ export class LatencyLogger {
       }
 
       this.logToConsole('event', this.formatEvent(event));
+
+      // Send event to frontend in real-time via constructor callback
+      if (this.eventCallback) {
+        this.eventCallback(event);
+      }
+
+      // Also support passed callback for backwards compatibility
+      if (callback) {
+        callback(event);
+      }
     }
   }
 
@@ -42,10 +56,10 @@ export class LatencyLogger {
     if (turn) {
       turn.endTime = process.hrtime.bigint();
       turn.totalLatencyMs = Number(turn.endTime - turn.startTime) / 1_000_000;
-      
+
       this.logToConsole('info', `✅ Completed turn ${this.currentTurnId}: ${turn.totalLatencyMs.toFixed(2)}ms total`);
       this.logLatencyBreakdown(turn);
-      
+
       this.currentTurnId = null;
       return turn;
     }
@@ -81,14 +95,14 @@ export class LatencyLogger {
     console.log('\n┌─────────────────────────────────────────────────────┐');
     console.log('│           LATENCY BREAKDOWN                         │');
     console.log('├─────────────────────────────────────────────────────┤');
-    
+
     const breakdown = this.calculateBreakdown(turn);
-    
+
     Object.entries(breakdown).forEach(([phase, ms]) => {
       const bar = '█'.repeat(Math.floor(ms / 10));
       console.log(`│ ${phase.padEnd(25)} ${ms.toFixed(2).padStart(8)}ms ${bar}`);
     });
-    
+
     console.log('├─────────────────────────────────────────────────────┤');
     console.log(`│ TOTAL LATENCY: ${turn.totalLatencyMs?.toFixed(2)}ms`.padEnd(54) + '│');
     console.log('└─────────────────────────────────────────────────────┘\n');
@@ -105,7 +119,7 @@ export class LatencyLogger {
     };
 
     const events = turn.events;
-    
+
     for (let i = 1; i < events.length; i++) {
       const curr = events[i];
       const prev = events[i - 1];

@@ -2,6 +2,7 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.DeepgramTTSHandler = exports.DeepgramSTTHandler = void 0;
 const sdk_1 = require("@deepgram/sdk");
+const wav_encoder_1 = require("./utils/wav-encoder");
 class DeepgramSTTHandler {
     deepgram;
     connection;
@@ -86,6 +87,7 @@ class DeepgramTTSHandler {
         const url = 'https://api.deepgram.com/v1/speak?model=aura-asteria-en&encoding=linear16&sample_rate=16000';
         const startTime = process.hrtime.bigint();
         let firstByteReceived = false;
+        const pcmChunks = [];
         try {
             const response = await fetch(url, {
                 method: 'POST',
@@ -106,6 +108,16 @@ class DeepgramTTSHandler {
                 const { done, value } = await reader.read();
                 if (done) {
                     console.log('✅ TTS streaming completed');
+                    // Combine all PCM chunks and wrap in WAV format
+                    const allPCM = Buffer.concat(pcmChunks);
+                    const wavBuffer = wav_encoder_1.WavEncoder.encodeWAV(allPCM, 16000, 1);
+                    this.logger.logEvent({
+                        eventType: 'audio_encoded_to_wav',
+                        timestamp: process.hrtime.bigint(),
+                        metadata: { pcmSize: allPCM.length, wavSize: wavBuffer.length },
+                    });
+                    // Send the complete WAV file
+                    onChunk(wavBuffer);
                     onComplete();
                     break;
                 }
@@ -124,7 +136,8 @@ class DeepgramTTSHandler {
                     timestamp: process.hrtime.bigint(),
                     metadata: { audioChunkSize: value.length },
                 });
-                onChunk(Buffer.from(value));
+                // Accumulate PCM chunks
+                pcmChunks.push(Buffer.from(value));
             }
         }
         catch (error) {

@@ -39,10 +39,19 @@ wss.on('connection', async (ws: WebSocket) => {
   const sessionId = `session_${Date.now()}`;
   console.log(`\n🔌 New WebSocket connection: ${sessionId}`);
 
-  const logger = new LatencyLogger();
+  // Create logger with real-time event callback
+  const logger = new LatencyLogger((event) => {
+    // Send each event to frontend in real-time
+    sendMessage(ws, {
+      type: 'latency',
+      data: event,
+      timestamp: Date.now(),
+    });
+  });
+  
   const sttHandler = new DeepgramSTTHandler(process.env.DEEPGRAM_API_KEY!, logger);
   const ttsHandler = new DeepgramTTSHandler(process.env.DEEPGRAM_API_KEY!, logger);
-  const llmHandler = new LLMHandler(process.env.ANTHROPIC_API_KEY!, logger);
+  const llmHandler = new LLMHandler(process.env.GROQ_API_KEY!, logger);
 
   connections.set(sessionId, {
     ws,
