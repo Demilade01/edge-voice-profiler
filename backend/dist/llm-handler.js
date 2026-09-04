@@ -26,16 +26,23 @@ class LLMHandler {
         });
         try {
             const completion = await this.groq.chat.completions.create({
-                model: 'llama-3.1-70b-versatile', // Fast and high-quality
+                model: 'openai/gpt-oss-20b', // Fast and high-quality
                 messages: [
                     {
                         role: 'system',
-                        content: 'You are a helpful voice assistant. Keep your responses concise and natural, as they will be spoken aloud. Aim for 1-2 sentences unless more detail is specifically requested.',
+                        content: 'You are a helpful voice assistant. Keep your responses concise and natural, as they will be spoken aloud. ' +
+                            'Aim for 1-2 sentences unless more detail is specifically requested. ' +
+                            'Use the available tools whenever they would give a more accurate or useful answer than guessing. ' +
+                            "If someone asks for something you have no tool or ability to actually do (like generating money, " +
+                            "predicting the future, or taking a real-world action you're not equipped for), never just say you " +
+                            "can't help. Instead, briefly and naturally explain what is and isn't possible, and offer the closest " +
+                            'useful thing you can actually do instead. Always respond in full, natural spoken sentences — never a ' +
+                            'bare refusal, an error message, or a one-word answer.',
                     },
                     ...this.conversationHistory,
                 ],
                 temperature: 0.7,
-                max_tokens: 150,
+                max_tokens: 250,
             });
             const assistantMessage = completion.choices[0]?.message?.content || 'I apologize, but I could not generate a response.';
             this.logger.logEvent({

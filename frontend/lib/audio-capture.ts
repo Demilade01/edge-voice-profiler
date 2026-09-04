@@ -1,9 +1,11 @@
 export class AudioCapture {
+  private readonly frameSamples = 800;
   private audioContext: AudioContext | null = null;
   private mediaStream: MediaStream | null = null;
   private audioWorkletNode: AudioWorkletNode | null = null;
   private onAudioDataCallback: ((data: Float32Array) => void) | null = null;
   private onVolumeCallback: ((volume: number) => void) | null = null;
+  private pendingSamples: number[] = [];
 
   async initialize(
     onAudioData: (data: Float32Array) => void,
@@ -25,15 +27,15 @@ export class AudioCapture {
       this.audioContext = new AudioContext({ sampleRate: 16000 });
       const source = this.audioContext.createMediaStreamSource(this.mediaStream);
 
-      // Create script processor for audio capture
-      const processor = this.audioContext.createScriptProcessor(4096, 1, 1);
+      // Buffer 1024-sample callbacks into exact 50 ms PCM frames.
+      const processor = this.audioContext.createScriptProcessor(1024, 1, 1);
 
       this.onAudioDataCallback = onAudioData;
       this.onVolumeCallback = onVolume || null;
 
       processor.onaudioprocess = (e) => {
         const inputData = e.inputBuffer.getChannelData(0);
-        
+
         // Calculate volume (RMS)
         if (this.onVolumeCallback) {
           let sum = 0;
@@ -45,9 +47,15 @@ export class AudioCapture {
           this.onVolumeCallback(volume);
         }
 
-        // Send audio data
-        if (this.onAudioDataCallback) {
-          this.onAudioDataCallback(inputData);
+        for (const sample of inputData) {
+          this.pendingSamples.push(sample);
+        }
+
+        while (this.pendingSamples.length >= this.frameSamples) {
+          const frame = new Float32Array(this.pendingSamples.splice(0, this.frameSamples));
+          if (this.onAudioDataCallback) {
+            this.onAudioDataCallback(frame);
+          }
         }
       };
 
@@ -62,6 +70,7 @@ export class AudioCapture {
   }
 
   stop(): void {
+    this.pendingSamples = [];
     if (this.audioWorkletNode) {
       this.audioWorkletNode.disconnect();
       this.audioWorkletNode = null;

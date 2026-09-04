@@ -1,4 +1,4 @@
-import { LatencyEvent, ConversationTurn } from '../types';
+import { LatencyEvent, ConversationTurn, LatencySummary } from '../types';
 
 export class LatencyLogger {
   private turns: Map<string, ConversationTurn> = new Map();
@@ -56,6 +56,7 @@ export class LatencyLogger {
     if (turn) {
       turn.endTime = process.hrtime.bigint();
       turn.totalLatencyMs = Number(turn.endTime - turn.startTime) / 1_000_000;
+      turn.summary = this.createSummary(turn);
 
       this.logToConsole('info', `✅ Completed turn ${this.currentTurnId}: ${turn.totalLatencyMs.toFixed(2)}ms total`);
       this.logLatencyBreakdown(turn);
@@ -155,6 +156,36 @@ export class LatencyLogger {
 
   getAllTurns(): ConversationTurn[] {
     return Array.from(this.turns.values());
+  }
+
+  private createSummary(turn: ConversationTurn): LatencySummary {
+    const first = (eventType: LatencyEvent['eventType']): LatencyEvent | undefined =>
+      turn.events.find((event) => event.eventType === eventType);
+    const delta = (from: LatencyEvent | undefined, to: LatencyEvent | undefined): number | undefined => {
+      if (!from || !to) return undefined;
+      return Number(to.timestamp - from.timestamp) / 1_000_000;
+    };
+
+    const firstServerAudio = first('server_audio_received');
+    const sttRequest = first('deepgram_stt_request_sent');
+    const sttResponse = first('deepgram_stt_response_received');
+    const llmRequest = first('llm_request_sent');
+    const llmResponse = first('llm_response_received');
+    const ttsRequest = first('deepgram_tts_request_sent');
+    const ttsFirstByte = first('deepgram_tts_first_byte');
+    const audioSent = first('audio_chunk_sent_to_client');
+
+    return {
+      turnId: turn.turnId,
+      clientToServerMs: firstServerAudio ? Number(firstServerAudio.timestamp - turn.startTime) / 1_000_000 : undefined,
+      sttMs: delta(sttRequest, sttResponse),
+      llmMs: delta(llmRequest, llmResponse),
+      ttsTimeToFirstByteMs: delta(ttsRequest, ttsFirstByte),
+      serverToClientMs: delta(ttsFirstByte, audioSent),
+      firstAudioMs: audioSent ? Number(audioSent.timestamp - turn.startTime) / 1_000_000 : undefined,
+      totalTurnMs: turn.totalLatencyMs,
+      cancelled: turn.events.some((event) => event.eventType === 'barge_in_detected'),
+    };
   }
 
   exportToJSON(): string {

@@ -1,10 +1,10 @@
 'use client';
 
-import { LatencyEvent } from '@/types';
-import { useEffect, useState } from 'react';
+import { LatencyEvent, LatencySummary } from '@/types';
 
 interface LatencyDashboardProps {
   events: LatencyEvent[];
+  summary: LatencySummary | null;
   isRecording: boolean;
 }
 
@@ -16,35 +16,8 @@ interface LatencyMetrics {
   total: number;
 }
 
-export default function LatencyDashboard({ events, isRecording }: LatencyDashboardProps) {
-  const [metrics, setMetrics] = useState<LatencyMetrics>({
-    transport: 0,
-    stt: 0,
-    llm: 0,
-    tts: 0,
-    total: 0,
-  });
-
-  useEffect(() => {
-    if (events.length === 0) return;
-
-    // Calculate latency for each hop
-    const latencyMap: Record<string, number> = {};
-    
-    events.forEach((event) => {
-      if (event.durationMs) {
-        latencyMap[event.eventType] = event.durationMs;
-      }
-    });
-
-    setMetrics({
-      transport: latencyMap['audio_received'] || 0,
-      stt: latencyMap['stt_complete'] || 0,
-      llm: latencyMap['llm_complete'] || 0,
-      tts: latencyMap['tts_first_byte'] || 0,
-      total: Object.values(latencyMap).reduce((sum, val) => sum + val, 0),
-    });
-  }, [events]);
+export default function LatencyDashboard({ events, summary, isRecording }: LatencyDashboardProps) {
+  const metrics = getMetrics(events, summary);
 
   const maxLatency = Math.max(
     metrics.transport,
@@ -153,7 +126,7 @@ function WaterfallItem({ label, value, max, color }: WaterfallItemProps) {
   return (
     <div className="waterfall-item">
       <div className="waterfall-label">{label}</div>
-      <div className="waterfall-bar-container">
+      <div className={`waterfall-bar-container ${color}`}>
         <div
           className="waterfall-bar-fill"
           style={{ width: `${percentage}%` }}
@@ -162,4 +135,36 @@ function WaterfallItem({ label, value, max, color }: WaterfallItemProps) {
       <div className="waterfall-time">{value.toFixed(0)}ms</div>
     </div>
   );
+}
+
+function getMetrics(events: LatencyEvent[], summary: LatencySummary | null): LatencyMetrics {
+  if (summary) {
+    return {
+      transport: summary.clientToServerMs || 0,
+      stt: summary.sttMs || 0,
+      llm: summary.llmMs || 0,
+      tts: summary.ttsTimeToFirstByteMs || 0,
+      total: summary.totalTurnMs || 0,
+    };
+  }
+
+  const latest = new Map<string, number>();
+  for (const event of events) {
+    if (typeof event.durationMs === 'number') {
+      latest.set(event.eventType, event.durationMs);
+    }
+  }
+
+  const transport = latest.get('server_audio_received') || 0;
+  const stt = latest.get('deepgram_stt_response_received') || 0;
+  const llm = latest.get('llm_response_received') || 0;
+  const tts = latest.get('deepgram_tts_first_byte') || 0;
+
+  return {
+    transport,
+    stt,
+    llm,
+    tts,
+    total: transport + stt + llm + tts,
+  };
 }

@@ -2,12 +2,19 @@ export interface LatencyEvent {
   eventType: string;
   timestamp: string;
   durationMs?: number;
-  metadata?: {
-    chunkSize?: number;
-    transcript?: string;
-    responseText?: string;
-    [key: string]: any;
-  };
+  metadata?: Record<string, unknown>;
+}
+
+export interface LatencySummary {
+  turnId: string;
+  clientToServerMs?: number;
+  sttMs?: number;
+  llmMs?: number;
+  ttsTimeToFirstByteMs?: number;
+  serverToClientMs?: number;
+  firstAudioMs?: number;
+  totalTurnMs?: number;
+  cancelled?: boolean;
 }
 
 export interface ConversationTurn {
@@ -19,12 +26,13 @@ export interface ConversationTurn {
 }
 
 export interface ServerMessage {
-  type: 'status' | 'transcript' | 'audio' | 'latency' | 'error';
-  data?: any;
+  type: 'status' | 'transcript' | 'audio' | 'latency' | 'summary' | 'error';
+  data?: unknown;
   timestamp?: number;
 }
 
 export interface ClientMessage {
   type: 'start' | 'stop' | 'barge_in';
+  turnId?: string;
   timestamp: number;
 }

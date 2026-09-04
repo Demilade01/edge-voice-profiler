@@ -13,14 +13,14 @@ A real-time voice chat application with comprehensive latency monitoring and net
 ## Architecture
 
 - **Frontend**: Next.js 15+ with React 19, TypeScript, Tailwind CSS
-- **Backend**: Node.js with Express, WebSocket, Deepgram STT/TTS, Claude AI
+- **Backend**: Node.js with Express, WebSocket, Deepgram STT/TTS, Groq LLM
 - **Real-time**: WebSocket-based bidirectional audio streaming
 
 ## Prerequisites
 
 - Node.js 18+ and npm
 - Deepgram API key (for STT/TTS)
-- Anthropic API key (for Claude LLM)
+- Groq API key (for the LLM)
 
 ## Setup
 
@@ -32,7 +32,7 @@ npm install
 
 # Create .env file
 echo "DEEPGRAM_API_KEY=your_deepgram_key_here" > .env
-echo "ANTHROPIC_API_KEY=your_anthropic_key_here" >> .env
+echo "GROQ_API_KEY=your_groq_key_here" >> .env
 echo "PORT=8080" >> .env
 
 # Start the backend
@@ -68,7 +68,7 @@ Open your browser to `http://localhost:3000`
 - 🎤 **Audio Capture**: Microphone to WebSocket
 - 📡 **Network RTT**: Round-trip time
 - 🎯 **STT Latency**: Speech-to-text processing
-- 🧠 **LLM Latency**: AI response generation (streaming)
+- 🧠 **LLM Latency**: AI response generation
 - 🔊 **TTS Latency**: Text-to-speech synthesis
 - ⏱️ **Total Latency**: End-to-end response time
 
@@ -200,7 +200,7 @@ npm start
 
 Get your API keys:
 - **Deepgram**: https://console.deepgram.com/
-- **Anthropic**: https://console.anthropic.com/
+- **Groq**: https://console.groq.com/
 
 ## License
 

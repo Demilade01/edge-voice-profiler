@@ -7,7 +7,7 @@ Node.js WebSocket server that handles the entire voice processing pipeline with 
 ## Architecture
 
 ```
-Client Audio → WebSocket → Deepgram STT → Claude LLM → Deepgram Aura TTS → Client
+Client Audio → WebSocket → Deepgram STT → Groq LLM → Deepgram Aura TTS → Client
                   ↓              ↓              ↓              ↓              ↓
               Timestamp      Timestamp      Timestamp      Timestamp      Timestamp
 ```
@@ -16,7 +16,7 @@ Client Audio → WebSocket → Deepgram STT → Claude LLM → Deepgram Aura TTS
 
 - **WebSocket Server**: Real-time bidirectional audio streaming
 - **Deepgram STT**: Streaming speech-to-text with live transcription
-- **Claude LLM**: Conversational AI via Anthropic API (seekai.cc endpoint)
+- **Groq LLM**: Fast conversational response generation
 - **Deepgram Aura TTS**: HTTP streaming text-to-speech with TTFB tracking
 - **Latency Logger**: Comprehensive event logging with `process.hrtime.bigint()` precision
 - **Session Management**: Independent session tracking per WebSocket connection
@@ -42,7 +42,7 @@ Add your API keys:
 
 ```env
 DEEPGRAM_API_KEY=your_deepgram_api_key
-ANTHROPIC_API_KEY=your_anthropic_api_key
+GROQ_API_KEY=your_groq_api_key
 PORT=8080
 NODE_ENV=development
 ```
@@ -70,10 +70,16 @@ npm start
 ### HTTP Endpoints
 
 - `GET /health` - Health check endpoint
+- `GET /ready` - Provider configuration readiness check
+- `GET /docs` - Interactive Swagger/OpenAPI documentation
 
 ### WebSocket
 
 - `ws://localhost:8080` - Main WebSocket connection
+
+The Swagger page documents the WebSocket control messages, binary `VPF1` audio
+frame format, server messages, and latency summary schema. Swagger UI does not
+open a WebSocket session; use the frontend or a WebSocket client for that.
 
 ## WebSocket Protocol
 
@@ -83,6 +89,7 @@ npm start
 ```json
 {
   "type": "start",
+  "turnId": "turn_1234567890",
   "timestamp": 1234567890
 }
 ```
@@ -91,6 +98,7 @@ npm start
 ```json
 {
   "type": "stop",
+  "turnId": "turn_1234567890",
   "timestamp": 1234567890
 }
 ```
@@ -99,12 +107,15 @@ npm start
 ```json
 {
   "type": "barge_in",
+  "turnId": "turn_1234567890",
   "timestamp": 1234567890
 }
 ```
 
 **Audio Data:**
-- Raw binary audio chunks (PCM 16-bit, 16kHz, mono)
+- Binary `VPF1` frames: 16-byte big-endian header followed by PCM16, 16kHz, mono audio
+- Header: magic `0x56504631`, uint32 sequence, float64 browser timestamp
+- Payload: normally 800 samples / 50 ms
 
 ### Server → Client Messages
 

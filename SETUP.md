@@ -7,7 +7,7 @@ Follow these steps to get the Voice Latency Profiler running:
 - [ ] Node.js 18+ installed
 - [ ] npm installed
 - [ ] Deepgram API key ready
-- [ ] Anthropic API key ready
+- [ ] Groq API key ready
 
 ## ✅ Backend Setup
 
@@ -19,7 +19,7 @@ npm install
 Create `backend/.env`:
 ```
 DEEPGRAM_API_KEY=your_deepgram_key_here
-ANTHROPIC_API_KEY=your_anthropic_key_here
+GROQ_API_KEY=your_groq_key_here
 PORT=8080
 ```
 

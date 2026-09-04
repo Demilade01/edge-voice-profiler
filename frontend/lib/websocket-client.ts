@@ -75,9 +75,15 @@ export class WebSocketClient {
     }
   }
 
-  sendAudio(audioData: ArrayBuffer): void {
+  sendAudio(audioData: ArrayBuffer, sequence: number, clientSentAt: number): void {
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-      this.ws.send(audioData);
+      const packet = new ArrayBuffer(16 + audioData.byteLength);
+      const view = new DataView(packet);
+      view.setUint32(0, 0x56504631);
+      view.setUint32(4, sequence);
+      view.setFloat64(8, clientSentAt);
+      new Uint8Array(packet, 16).set(new Uint8Array(audioData));
+      this.ws.send(packet);
     }
   }
 

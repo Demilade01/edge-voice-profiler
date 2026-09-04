@@ -40,7 +40,7 @@ export class DeepgramSTTHandler {
 
     this.connection.on(LiveTranscriptionEvents.Transcript, (data: any) => {
       const transcript = data.channel?.alternatives?.[0]?.transcript;
-      
+
       if (transcript && transcript.trim().length > 0) {
         this.logger.logEvent({
           eventType: 'deepgram_stt_response_received',
@@ -49,7 +49,7 @@ export class DeepgramSTTHandler {
         });
 
         console.log(`📝 Transcript: "${transcript}"`);
-        
+
         if (this.onTranscriptCallback) {
           this.onTranscriptCallback(transcript);
         }
@@ -87,6 +87,8 @@ export class DeepgramSTTHandler {
 export class DeepgramTTSHandler {
   private apiKey: string;
   private logger: LatencyLogger;
+  private abortController: AbortController | null = null;
+  private reader: ReadableStreamDefaultReader<Uint8Array> | null = null;
 
   constructor(apiKey: string, logger: LatencyLogger) {
     this.apiKey = apiKey;
@@ -110,7 +112,7 @@ export class DeepgramTTSHandler {
 
     const startTime = process.hrtime.bigint();
     let firstByteReceived = false;
-    const pcmChunks: Buffer[] = [];
+    this.abortController = new AbortController();
 
     try {
       const response = await fetch(url, {
@@ -119,6 +121,7 @@ export class DeepgramTTSHandler {
           'Authorization': `Token ${this.apiKey}`,
           'Content-Type': 'application/json',
         },
+        signal: this.abortController.signal,
         body: JSON.stringify({ text }),
       });
 
@@ -126,29 +129,17 @@ export class DeepgramTTSHandler {
         throw new Error(`TTS request failed: ${response.status} ${response.statusText}`);
       }
 
-      const reader = response.body?.getReader();
-      if (!reader) {
+      this.reader = response.body?.getReader() || null;
+      if (!this.reader) {
         throw new Error('No response body reader available');
       }
 
       while (true) {
-        const { done, value } = await reader.read();
+        const { done, value } = await this.reader.read();
 
         if (done) {
           console.log('✅ TTS streaming completed');
-          
-          // Combine all PCM chunks and wrap in WAV format
-          const allPCM = Buffer.concat(pcmChunks);
-          const wavBuffer = WavEncoder.encodeWAV(allPCM, 16000, 1);
-          
-          this.logger.logEvent({
-            eventType: 'audio_encoded_to_wav',
-            timestamp: process.hrtime.bigint(),
-            metadata: { pcmSize: allPCM.length, wavSize: wavBuffer.length },
-          });
 
-          // Send the complete WAV file
-          onChunk(wavBuffer);
           onComplete();
           break;
         }
@@ -170,12 +161,32 @@ export class DeepgramTTSHandler {
           metadata: { audioChunkSize: value.length },
         });
 
-        // Accumulate PCM chunks
-        pcmChunks.push(Buffer.from(value));
+        // Wrap each PCM chunk independently so the browser can begin playback immediately.
+        const pcmChunk = Buffer.from(value);
+        const wavChunk = WavEncoder.encodeWAV(pcmChunk, 16000, 1);
+        this.logger.logEvent({
+          eventType: 'audio_encoded_to_wav',
+          timestamp: process.hrtime.bigint(),
+          metadata: { pcmSize: pcmChunk.length, wavSize: wavChunk.length },
+        });
+        onChunk(wavChunk);
       }
     } catch (error) {
+      if (this.abortController?.signal.aborted) {
+        console.log('🛑 TTS stream aborted');
+        return;
+      }
       console.error('❌ TTS Error:', error);
       throw error;
+    } finally {
+      this.reader = null;
+      this.abortController = null;
     }
+  }
+
+  abort(): void {
+    this.abortController?.abort();
+    void this.reader?.cancel();
+    this.reader = null;
   }
 }

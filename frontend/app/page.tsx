@@ -4,7 +4,7 @@ import { useEffect, useRef, useState } from 'react';
 import { AudioCapture } from '@/lib/audio-capture';
 import { VoiceActivityDetector } from '@/lib/vad';
 import { WebSocketClient } from '@/lib/websocket-client';
-import { LatencyEvent, ServerMessage } from '@/types';
+import { LatencyEvent, LatencySummary, ServerMessage } from '@/types';
 import LatencyDashboard from '@/components/LatencyDashboard';
 import AudioVisualizer from '@/components/AudioVisualizer';
 
@@ -18,6 +18,7 @@ export default function Home() {
   const [transcript, setTranscript] = useState('');
   const [response, setResponse] = useState('');
   const [events, setEvents] = useState<LatencyEvent[]>([]);
+  const [summary, setSummary] = useState<LatencySummary | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const audioCapture = useRef<AudioCapture | null>(null);
@@ -26,22 +27,60 @@ export default function Home() {
   const audioContext = useRef<AudioContext | null>(null);
   const audioQueue = useRef<AudioBuffer[]>([]);
   const isPlaying = useRef(false);
+  const activeTurnId = useRef<string | null>(null);
+  const audioSequence = useRef(0);
+
+  const stopAgentAudio = () => {
+    audioQueue.current = [];
+    if (audioContext.current) {
+      void audioContext.current.close();
+      audioContext.current = new AudioContext({ sampleRate: 16000 });
+    }
+    isPlaying.current = false;
+  };
 
   useEffect(() => {
     const wsUrl = process.env.NEXT_PUBLIC_WS_URL || 'ws://localhost:8080';
     wsClient.current = new WebSocketClient(wsUrl);
 
     vad.current = new VoiceActivityDetector(
-      () => setIsSpeaking(true),
-      () => setIsSpeaking(false),
+      () => {
+        const turnId = `turn_${Date.now()}`;
+        activeTurnId.current = turnId;
+        setIsSpeaking(true);
+        wsClient.current?.sendMessage({
+          type: 'start',
+          turnId,
+          timestamp: performance.now(),
+        });
+      },
+      () => {
+        setIsSpeaking(false);
+        if (activeTurnId.current) {
+          wsClient.current?.sendMessage({
+            type: 'stop',
+            turnId: activeTurnId.current,
+            timestamp: performance.now(),
+          });
+          activeTurnId.current = null;
+        }
+      },
       () => {
         console.log('🛑 Barge-in triggered!');
         stopAgentAudio();
-        wsClient.current?.sendMessage({ type: 'barge_in', timestamp: performance.now() });
+        wsClient.current?.sendMessage({
+          type: 'barge_in',
+          turnId: activeTurnId.current || undefined,
+          timestamp: performance.now(),
+        });
       }
     );
 
-    return () => disconnect();
+    return () => {
+      audioCapture.current?.stop();
+      wsClient.current?.disconnect();
+      activeTurnId.current = null;
+    };
   }, []);
 
   const connect = async () => {
@@ -54,10 +93,15 @@ export default function Home() {
       );
 
       audioCapture.current = new AudioCapture();
+      audioSequence.current = 0;
       await audioCapture.current.initialize(
         (audioData: Float32Array) => {
           const buffer = float32ToInt16(audioData);
-          wsClient.current?.sendAudio(buffer.buffer as ArrayBuffer);
+          wsClient.current?.sendAudio(
+            buffer.buffer as ArrayBuffer,
+            audioSequence.current++,
+            performance.now()
+          );
         },
         (vol: number) => {
           setVolume(vol);
@@ -83,26 +127,35 @@ export default function Home() {
   const handleServerMessage = (message: ServerMessage) => {
     switch (message.type) {
       case 'transcript':
-        setTranscript(message.data.text || '');
+        setTranscript(typeof message.data === 'string' ? message.data : '');
         break;
       case 'audio':
-        if (message.data) playAudioChunk(message.data);
+        if (typeof message.data === 'string') playAudioChunk(message.data);
         break;
       case 'latency':
-        if (message.data) setEvents((prev) => [...prev, message.data]);
+        const latencyEvent = message.data;
+        if (isLatencyEvent(latencyEvent)) {
+          setEvents((prev) => [...prev, latencyEvent]);
+        }
+        break;
+      case 'summary':
+        if (isLatencySummary(message.data)) setSummary(message.data);
         break;
       case 'status':
-        if (message.data?.event === 'agent_speaking_start') {
+        if (!isRecord(message.data)) break;
+        if (message.data.event === 'agent_speaking_start') {
           setIsAgentSpeaking(true);
           vad.current?.setAgentSpeaking(true);
-          setResponse(message.data.text || '');
-        } else if (message.data?.event === 'agent_speaking_end') {
+          setResponse(typeof message.data.text === 'string' ? message.data.text : '');
+        } else if (message.data.event === 'agent_speaking_end') {
           setIsAgentSpeaking(false);
           vad.current?.setAgentSpeaking(false);
         }
         break;
       case 'error':
-        setError(message.data?.message || 'An error occurred');
+        setError(isRecord(message.data) && typeof message.data.message === 'string'
+          ? message.data.message
+          : 'An error occurred');
         break;
     }
   };
@@ -136,15 +189,6 @@ export default function Home() {
     source.connect(audioContext.current.destination);
     source.onended = () => playNextChunk();
     source.start();
-  };
-
-  const stopAgentAudio = () => {
-    audioQueue.current = [];
-    if (audioContext.current) {
-      audioContext.current.close();
-      audioContext.current = new AudioContext({ sampleRate: 16000 });
-    }
-    isPlaying.current = false;
   };
 
   const float32ToInt16 = (float32Array: Float32Array): Int16Array => {
@@ -220,7 +264,7 @@ export default function Home() {
 
           <div className="card">
             <h3 className="text-xl font-bold mb-4">Conversation</h3>
-            
+
             {transcript && (
               <div className="mb-4 p-4 bg-blue-50 rounded-lg">
                 <div className="text-sm font-semibold text-blue-700 mb-1">You said:</div>
@@ -244,7 +288,7 @@ export default function Home() {
         </div>
 
         <div>
-          <LatencyDashboard events={events} isRecording={isRecording} />
+          <LatencyDashboard events={events} summary={summary} isRecording={isRecording} />
         </div>
       </div>
 
@@ -262,4 +306,16 @@ export default function Home() {
       </div>
     </div>
   );
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null;
+}
+
+function isLatencyEvent(value: unknown): value is LatencyEvent {
+  return isRecord(value) && typeof value.eventType === 'string' && typeof value.timestamp === 'string';
+}
+
+function isLatencySummary(value: unknown): value is LatencySummary {
+  return isRecord(value) && typeof value.turnId === 'string';
 }

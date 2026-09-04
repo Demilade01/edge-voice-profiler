@@ -73,6 +73,8 @@ exports.DeepgramSTTHandler = DeepgramSTTHandler;
 class DeepgramTTSHandler {
     apiKey;
     logger;
+    abortController = null;
+    reader = null;
     constructor(apiKey, logger) {
         this.apiKey = apiKey;
         this.logger = logger;
@@ -87,7 +89,7 @@ class DeepgramTTSHandler {
         const url = 'https://api.deepgram.com/v1/speak?model=aura-asteria-en&encoding=linear16&sample_rate=16000';
         const startTime = process.hrtime.bigint();
         let firstByteReceived = false;
-        const pcmChunks = [];
+        this.abortController = new AbortController();
         try {
             const response = await fetch(url, {
                 method: 'POST',
@@ -95,29 +97,20 @@ class DeepgramTTSHandler {
                     'Authorization': `Token ${this.apiKey}`,
                     'Content-Type': 'application/json',
                 },
+                signal: this.abortController.signal,
                 body: JSON.stringify({ text }),
             });
             if (!response.ok) {
                 throw new Error(`TTS request failed: ${response.status} ${response.statusText}`);
             }
-            const reader = response.body?.getReader();
-            if (!reader) {
+            this.reader = response.body?.getReader() || null;
+            if (!this.reader) {
                 throw new Error('No response body reader available');
             }
             while (true) {
-                const { done, value } = await reader.read();
+                const { done, value } = await this.reader.read();
                 if (done) {
                     console.log('✅ TTS streaming completed');
-                    // Combine all PCM chunks and wrap in WAV format
-                    const allPCM = Buffer.concat(pcmChunks);
-                    const wavBuffer = wav_encoder_1.WavEncoder.encodeWAV(allPCM, 16000, 1);
-                    this.logger.logEvent({
-                        eventType: 'audio_encoded_to_wav',
-                        timestamp: process.hrtime.bigint(),
-                        metadata: { pcmSize: allPCM.length, wavSize: wavBuffer.length },
-                    });
-                    // Send the complete WAV file
-                    onChunk(wavBuffer);
                     onComplete();
                     break;
                 }
@@ -136,14 +129,34 @@ class DeepgramTTSHandler {
                     timestamp: process.hrtime.bigint(),
                     metadata: { audioChunkSize: value.length },
                 });
-                // Accumulate PCM chunks
-                pcmChunks.push(Buffer.from(value));
+                // Wrap each PCM chunk independently so the browser can begin playback immediately.
+                const pcmChunk = Buffer.from(value);
+                const wavChunk = wav_encoder_1.WavEncoder.encodeWAV(pcmChunk, 16000, 1);
+                this.logger.logEvent({
+                    eventType: 'audio_encoded_to_wav',
+                    timestamp: process.hrtime.bigint(),
+                    metadata: { pcmSize: pcmChunk.length, wavSize: wavChunk.length },
+                });
+                onChunk(wavChunk);
             }
         }
         catch (error) {
+            if (this.abortController?.signal.aborted) {
+                console.log('🛑 TTS stream aborted');
+                return;
+            }
             console.error('❌ TTS Error:', error);
             throw error;
         }
+        finally {
+            this.reader = null;
+            this.abortController = null;
+        }
+    }
+    abort() {
+        this.abortController?.abort();
+        void this.reader?.cancel();
+        this.reader = null;
     }
 }
 exports.DeepgramTTSHandler = DeepgramTTSHandler;

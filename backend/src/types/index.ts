@@ -21,8 +21,20 @@ export interface LatencyEvent {
     audioChunkSize?: number;
     wavSize?: number;
     ttfb?: number;
-    [key: string]: any;
+    [key: string]: unknown;
   };
+}
+
+export interface LatencySummary {
+  turnId: string;
+  clientToServerMs?: number;
+  sttMs?: number;
+  llmMs?: number;
+  ttsTimeToFirstByteMs?: number;
+  serverToClientMs?: number;
+  firstAudioMs?: number;
+  totalTurnMs?: number;
+  cancelled?: boolean;
 }
 
 export interface ConversationTurn {
@@ -31,6 +43,7 @@ export interface ConversationTurn {
   startTime: bigint;
   endTime?: bigint;
   totalLatencyMs?: number;
+  summary?: LatencySummary;
 }
 
 export interface AudioChunk {
@@ -40,12 +53,13 @@ export interface AudioChunk {
 
 export interface ClientMessage {
   type: 'audio' | 'start' | 'stop' | 'barge_in';
+  turnId?: string;
   data?: ArrayBuffer | string;
   timestamp?: number;
 }
 
 export interface ServerMessage {
-  type: 'audio' | 'transcript' | 'latency' | 'error' | 'status';
-  data?: any;
+  type: 'audio' | 'transcript' | 'latency' | 'summary' | 'error' | 'status';
+  data?: unknown;
   timestamp?: number;
 }

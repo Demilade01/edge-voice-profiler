@@ -9,7 +9,7 @@ if not exist "backend\.env" (
     echo [ERROR] backend\.env not found!
     echo Please create backend\.env with:
     echo   DEEPGRAM_API_KEY=your_key
-    echo   ANTHROPIC_API_KEY=your_key
+    echo   GROQ_API_KEY=your_key
     echo   PORT=8080
     echo.
     pause
