@@ -210,6 +210,3 @@ MIT
 
 Pull requests welcome! Please ensure all tests pass and code is formatted.
 
----
-
-Built with ❤️ for low-latency voice AI
