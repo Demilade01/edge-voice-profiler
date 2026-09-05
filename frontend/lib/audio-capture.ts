@@ -60,7 +60,10 @@ export class AudioCapture {
       };
 
       source.connect(processor);
-      processor.connect(this.audioContext.destination);
+      const silentOutput = this.audioContext.createGain();
+      silentOutput.gain.value = 0;
+      processor.connect(silentOutput);
+      silentOutput.connect(this.audioContext.destination);
 
       console.log('🎤 Microphone initialized successfully');
     } catch (error) {

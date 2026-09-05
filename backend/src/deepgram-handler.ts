@@ -112,6 +112,7 @@ export class DeepgramTTSHandler {
 
     const startTime = process.hrtime.bigint();
     let firstByteReceived = false;
+    const pcmChunks: Buffer[] = [];
     this.abortController = new AbortController();
 
     try {
@@ -140,6 +141,15 @@ export class DeepgramTTSHandler {
         if (done) {
           console.log('✅ TTS streaming completed');
 
+          const pcmAudio = Buffer.concat(pcmChunks);
+          const wavAudio = WavEncoder.encodeWAV(pcmAudio, 16000, 1);
+          this.logger.logEvent({
+            eventType: 'audio_encoded_to_wav',
+            timestamp: process.hrtime.bigint(),
+            metadata: { pcmSize: pcmAudio.length, wavSize: wavAudio.length },
+          });
+          onChunk(wavAudio);
+
           onComplete();
           break;
         }
@@ -161,15 +171,7 @@ export class DeepgramTTSHandler {
           metadata: { audioChunkSize: value.length },
         });
 
-        // Wrap each PCM chunk independently so the browser can begin playback immediately.
-        const pcmChunk = Buffer.from(value);
-        const wavChunk = WavEncoder.encodeWAV(pcmChunk, 16000, 1);
-        this.logger.logEvent({
-          eventType: 'audio_encoded_to_wav',
-          timestamp: process.hrtime.bigint(),
-          metadata: { pcmSize: pcmChunk.length, wavSize: wavChunk.length },
-        });
-        onChunk(wavChunk);
+        pcmChunks.push(Buffer.from(value));
       }
     } catch (error) {
       if (this.abortController?.signal.aborted) {

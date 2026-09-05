@@ -30,7 +30,11 @@ class LatencyLogger {
                 const durationNs = event.timestamp - prevEvent.timestamp;
                 event.durationMs = Number(durationNs) / 1_000_000;
             }
-            this.logToConsole('event', this.formatEvent(event));
+            const isHighFrequencyAudioEvent = event.eventType === 'server_audio_received' ||
+                event.eventType === 'deepgram_stt_request_sent';
+            if (!isHighFrequencyAudioEvent) {
+                this.logToConsole('event', this.formatEvent(event));
+            }
             // Send event to frontend in real-time via constructor callback
             if (this.eventCallback) {
                 this.eventCallback(event);

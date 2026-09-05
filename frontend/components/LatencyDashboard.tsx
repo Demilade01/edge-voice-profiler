@@ -93,17 +93,18 @@ export default function LatencyDashboard({ events, summary, isRecording }: Laten
       {/* Recent Events Log */}
       {events.length > 0 && (
         <div className="mt-6">
-          <h3 className="text-lg font-bold mb-3">Recent Events</h3>
-          <div className="max-h-40 overflow-y-auto space-y-1">
-            {events.slice(-10).reverse().map((event, idx) => (
+          <div className="flex items-center justify-between mb-3">
+            <h3 className="text-lg font-bold">Recent Events</h3>
+            <span className="event-count">{events.length} captured</span>
+          </div>
+          <div className="event-feed">
+            {getDisplayEvents(events).map((event) => (
               <div
-                key={idx}
-                className="text-sm py-1 px-2 bg-gray-50 rounded flex justify-between"
+                key={event.key}
+                className={`event-row ${event.kind === 'transport' ? 'event-row-muted' : ''}`}
               >
-                <span className="font-medium">{event.eventType}</span>
-                <span className="text-gray-600">
-                  {event.durationMs ? `${event.durationMs.toFixed(0)}ms` : '-'}
-                </span>
+                <span className="font-medium">{event.label}</span>
+                <span className="text-gray-600">{event.value}</span>
               </div>
             ))}
           </div>
@@ -111,6 +112,48 @@ export default function LatencyDashboard({ events, summary, isRecording }: Laten
       )}
     </div>
   );
+}
+
+interface DisplayEvent {
+  key: string;
+  label: string;
+  value: string;
+  kind: 'milestone' | 'transport';
+}
+
+function getDisplayEvents(events: LatencyEvent[]): DisplayEvent[] {
+  const transportEvents = events.filter((event) => event.eventType === 'server_audio_received');
+  const milestones: DisplayEvent[] = events
+    .filter((event) => event.eventType !== 'server_audio_received' && event.eventType !== 'deepgram_stt_request_sent')
+    .slice(-8)
+    .reverse()
+    .map((event, index) => ({
+      key: `${event.timestamp}-${event.eventType}-${index}`,
+      label: formatEventName(event.eventType),
+      value: formatDuration(event.durationMs),
+      kind: 'milestone' as const,
+    }));
+
+  if (transportEvents.length > 0) {
+    milestones.push({
+      key: 'transport-summary',
+      label: 'Audio transport',
+      value: `${transportEvents.length} frames`,
+      kind: 'transport',
+    });
+  }
+
+  return milestones;
+}
+
+function formatEventName(eventType: string): string {
+  return eventType
+    .replaceAll('_', ' ')
+    .replace(/\b\w/g, (letter) => letter.toUpperCase());
+}
+
+function formatDuration(durationMs?: number): string {
+  return typeof durationMs === 'number' ? `${durationMs.toFixed(0)}ms` : 'pending';
 }
 
 interface WaterfallItemProps {
