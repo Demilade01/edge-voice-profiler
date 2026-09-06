@@ -2,7 +2,6 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.DeepgramTTSHandler = exports.DeepgramSTTHandler = void 0;
 const sdk_1 = require("@deepgram/sdk");
-const wav_encoder_1 = require("./utils/wav-encoder");
 class DeepgramSTTHandler {
     deepgram;
     connection;
@@ -75,12 +74,15 @@ class DeepgramTTSHandler {
     logger;
     abortController = null;
     reader = null;
+    requestId = 0;
     constructor(apiKey, logger) {
         this.apiKey = apiKey;
         this.logger = logger;
     }
     async synthesize(text, onChunk, onComplete) {
         console.log(`🔊 Starting TTS synthesis for: "${text}"`);
+        const requestId = ++this.requestId;
+        const isCurrentRequest = () => this.requestId === requestId;
         this.logger.logEvent({
             eventType: 'deepgram_tts_request_sent',
             timestamp: process.hrtime.bigint(),
@@ -89,8 +91,28 @@ class DeepgramTTSHandler {
         const url = 'https://api.deepgram.com/v1/speak?model=aura-asteria-en&encoding=linear16&sample_rate=16000';
         const startTime = process.hrtime.bigint();
         let firstByteReceived = false;
-        const pcmChunks = [];
-        this.abortController = new AbortController();
+        const abortController = new AbortController();
+        this.abortController = abortController;
+        // Stream raw PCM directly to the client — no WAV encoding.
+        // The client's AudioWorklet ring buffer consumes continuous PCM samples,
+        // so there are no chunk boundaries, no WAV headers, and no decode artifacts.
+        // We flush every ~8000 bytes (~250ms of 16kHz/16bit mono audio).
+        const CHUNK_THRESHOLD = 8000;
+        let pendingPcm = Buffer.alloc(0);
+        let chunkIndex = 0;
+        const flushChunk = () => {
+            if (!isCurrentRequest() || pendingPcm.length === 0)
+                return;
+            this.logger.logEvent({
+                eventType: 'audio_chunk_sent_to_client',
+                timestamp: process.hrtime.bigint(),
+                metadata: { chunkSize: pendingPcm.length, chunkIndex },
+            });
+            // Send raw PCM bytes directly — no WAV wrapping
+            onChunk(pendingPcm);
+            chunkIndex++;
+            pendingPcm = Buffer.alloc(0);
+        };
         try {
             const response = await fetch(url, {
                 method: 'POST',
@@ -98,7 +120,7 @@ class DeepgramTTSHandler {
                     'Authorization': `Token ${this.apiKey}`,
                     'Content-Type': 'application/json',
                 },
-                signal: this.abortController.signal,
+                signal: abortController.signal,
                 body: JSON.stringify({ text }),
             });
             if (!response.ok) {
@@ -108,19 +130,21 @@ class DeepgramTTSHandler {
             if (!this.reader) {
                 throw new Error('No response body reader available');
             }
+            const reader = this.reader;
             while (true) {
-                const { done, value } = await this.reader.read();
+                if (!isCurrentRequest()) {
+                    console.log('🛑 TTS delivery stopped (abort flag)');
+                    return;
+                }
+                const { done, value } = await reader.read();
                 if (done) {
-                    console.log('✅ TTS streaming completed');
-                    const pcmAudio = Buffer.concat(pcmChunks);
-                    const wavAudio = wav_encoder_1.WavEncoder.encodeWAV(pcmAudio, 16000, 1);
-                    this.logger.logEvent({
-                        eventType: 'audio_encoded_to_wav',
-                        timestamp: process.hrtime.bigint(),
-                        metadata: { pcmSize: pcmAudio.length, wavSize: wavAudio.length },
-                    });
-                    onChunk(wavAudio);
-                    onComplete();
+                    if (!isCurrentRequest())
+                        return;
+                    // Flush any remaining PCM data
+                    flushChunk();
+                    console.log(`✅ TTS streaming completed (${chunkIndex} chunks sent)`);
+                    if (isCurrentRequest())
+                        onComplete();
                     break;
                 }
                 if (!firstByteReceived) {
@@ -138,11 +162,15 @@ class DeepgramTTSHandler {
                     timestamp: process.hrtime.bigint(),
                     metadata: { audioChunkSize: value.length },
                 });
-                pcmChunks.push(Buffer.from(value));
+                // Accumulate raw PCM and flush when we have enough
+                pendingPcm = Buffer.concat([pendingPcm, Buffer.from(value)]);
+                if (pendingPcm.length >= CHUNK_THRESHOLD) {
+                    flushChunk();
+                }
             }
         }
         catch (error) {
-            if (this.abortController?.signal.aborted) {
+            if (!isCurrentRequest() || abortController.signal.aborted) {
                 console.log('🛑 TTS stream aborted');
                 return;
             }
@@ -150,14 +178,21 @@ class DeepgramTTSHandler {
             throw error;
         }
         finally {
-            this.reader = null;
-            this.abortController = null;
+            if (isCurrentRequest()) {
+                this.reader = null;
+                this.abortController = null;
+            }
         }
     }
     abort() {
+        this.requestId++;
         this.abortController?.abort();
-        void this.reader?.cancel();
+        const reader = this.reader;
         this.reader = null;
+        if (reader) {
+            void reader.cancel().catch(() => {
+            });
+        }
     }
 }
 exports.DeepgramTTSHandler = DeepgramTTSHandler;

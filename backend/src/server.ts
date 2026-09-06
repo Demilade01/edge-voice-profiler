@@ -53,6 +53,7 @@ const connections = new Map<string, {
   llmHandler: LLMHandler;
   isProcessing: boolean;
   activeTurnId: string | null;
+  responseGeneration: number;
 }>();
 
 console.log('🚀 Starting Voice Latency Profiler Backend...\n');
@@ -83,13 +84,21 @@ wss.on('connection', async (ws: WebSocket) => {
     llmHandler,
     isProcessing: false,
     activeTurnId: null,
+    responseGeneration: 0,
   });
 
   await sttHandler.initialize(async (transcript: string) => {
     const conn = connections.get(sessionId);
-    if (!conn || conn.isProcessing) return;
+    if (!conn || conn.isProcessing || !conn.activeTurnId) return;
 
     conn.isProcessing = true;
+    const turnId = conn.activeTurnId;
+    const responseId = ++conn.responseGeneration;
+    const isCurrentResponse = () => (
+      conn.isProcessing &&
+      conn.activeTurnId === turnId &&
+      conn.responseGeneration === responseId
+    );
 
     try {
       sendMessage(ws, {
@@ -100,15 +109,19 @@ wss.on('connection', async (ws: WebSocket) => {
 
       const response = await llmHandler.getResponse(transcript);
 
+      if (!isCurrentResponse()) return;
+
       sendMessage(ws, {
         type: 'status',
-        data: { event: 'agent_speaking_start', text: response },
+        data: { event: 'agent_speaking_start', text: response, turnId, responseId },
         timestamp: Date.now(),
       });
 
       await ttsHandler.synthesize(
         response,
         (audioChunk: Buffer) => {
+          if (!isCurrentResponse()) return;
+
           logger.logEvent({
             eventType: 'audio_chunk_sent_to_client',
             timestamp: process.hrtime.bigint(),
@@ -119,14 +132,18 @@ wss.on('connection', async (ws: WebSocket) => {
             ws.send(JSON.stringify({
               type: 'audio',
               data: audioChunk.toString('base64'),
+              turnId,
+              responseId,
               timestamp: Date.now(),
             }));
           }
         },
         () => {
+          if (!isCurrentResponse()) return;
+
           sendMessage(ws, {
             type: 'status',
-            data: { event: 'agent_speaking_end' },
+            data: { event: 'agent_speaking_end', turnId, responseId },
             timestamp: Date.now(),
           });
           logger.endTurn();
@@ -144,6 +161,7 @@ wss.on('connection', async (ws: WebSocket) => {
         }
       );
     } catch (error) {
+      if (!isCurrentResponse()) return;
       console.error('❌ Error processing conversation:', error);
       conn.isProcessing = false;
       sendMessage(ws, {
@@ -177,6 +195,8 @@ wss.on('connection', async (ws: WebSocket) => {
         if (message.turnId && message.turnId !== conn.activeTurnId) return;
       } else if (message.type === 'barge_in') {
         console.log('🛑 Barge-in detected by client');
+        const cancelledResponseId = conn.responseGeneration;
+        conn.responseGeneration++;
         conn.logger.logEvent({
           eventType: 'barge_in_detected',
           timestamp: process.hrtime.bigint(),
@@ -186,7 +206,11 @@ wss.on('connection', async (ws: WebSocket) => {
         conn.activeTurnId = null;
         sendMessage(ws, {
           type: 'status',
-          data: { event: 'agent_speaking_end', reason: 'barge_in' },
+          data: {
+            event: 'agent_speaking_end',
+            reason: 'barge_in',
+            responseId: cancelledResponseId,
+          },
           timestamp: Date.now(),
         });
         const cancelledTurn = conn.logger.endTurn();

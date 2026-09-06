@@ -7,6 +7,7 @@ export class VoiceActivityDetector {
   private onSpeechEnd: (() => void) | null = null;
   private onBargeIn: (() => void) | null = null;
   private isAgentSpeaking: boolean = false;
+  private hasBargedIn: boolean = false;
 
   constructor(
     onSpeechStart?: () => void,
@@ -20,6 +21,9 @@ export class VoiceActivityDetector {
 
   setAgentSpeaking(speaking: boolean): void {
     this.isAgentSpeaking = speaking;
+    if (!speaking) {
+      this.hasBargedIn = false;
+    }
   }
 
   processVolume(volume: number): void {
@@ -29,16 +33,16 @@ export class VoiceActivityDetector {
       // Voice activity detected
       this.lastSpeechTime = now;
 
+      if (this.isAgentSpeaking && !this.hasBargedIn && this.onBargeIn) {
+        this.hasBargedIn = true;
+        console.log('🛑 Barge-in detected!');
+        this.onBargeIn();
+      }
+
       if (!this.isSpeaking) {
         this.isSpeaking = true;
         console.log('🗣️ Speech started');
-        
-        // Check for barge-in
-        if (this.isAgentSpeaking && this.onBargeIn) {
-          console.log('🛑 Barge-in detected!');
-          this.onBargeIn();
-        }
-        
+
         if (this.onSpeechStart) {
           this.onSpeechStart();
         }
@@ -58,6 +62,7 @@ export class VoiceActivityDetector {
   reset(): void {
     this.isSpeaking = false;
     this.lastSpeechTime = 0;
+    this.hasBargedIn = false;
   }
 
   getSpeakingState(): boolean {

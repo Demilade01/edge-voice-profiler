@@ -29,6 +29,13 @@ export interface ServerMessage {
   type: 'status' | 'transcript' | 'audio' | 'latency' | 'summary' | 'error';
   data?: unknown;
   timestamp?: number;
+  turnId?: string;
+  responseId?: number;
+}
+
+export interface ResponseMessageData {
+  turnId?: string;
+  responseId: number;
 }
 
 export interface ClientMessage {

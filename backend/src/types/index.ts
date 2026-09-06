@@ -9,7 +9,6 @@ export interface LatencyEvent {
     | 'deepgram_tts_request_sent'
     | 'deepgram_tts_first_byte'
     | 'deepgram_tts_chunk_received'
-    | 'audio_encoded_to_wav'
     | 'audio_chunk_sent_to_client'
     | 'barge_in_detected';
   timestamp: bigint;
@@ -19,7 +18,6 @@ export interface LatencyEvent {
     transcript?: string;
     responseText?: string;
     audioChunkSize?: number;
-    wavSize?: number;
     ttfb?: number;
     [key: string]: unknown;
   };
@@ -62,4 +60,11 @@ export interface ServerMessage {
   type: 'audio' | 'transcript' | 'latency' | 'summary' | 'error' | 'status';
   data?: unknown;
   timestamp?: number;
+  turnId?: string;
+  responseId?: number;
+}
+
+export interface ResponseMessageData {
+  turnId?: string;
+  responseId: number;
 }

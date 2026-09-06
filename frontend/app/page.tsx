@@ -25,18 +25,19 @@ export default function Home() {
   const wsClient = useRef<WebSocketClient | null>(null);
   const vad = useRef<VoiceActivityDetector | null>(null);
   const audioContext = useRef<AudioContext | null>(null);
-  const audioQueue = useRef<AudioBuffer[]>([]);
-  const isPlaying = useRef(false);
+  const workletNode = useRef<AudioWorkletNode | null>(null);
   const activeTurnId = useRef<string | null>(null);
+  const responseGeneration = useRef(0);
   const audioSequence = useRef(0);
 
   const stopAgentAudio = () => {
-    audioQueue.current = [];
-    if (audioContext.current) {
-      void audioContext.current.close();
-      audioContext.current = new AudioContext({ sampleRate: 16000 });
-    }
-    isPlaying.current = false;
+    responseGeneration.current += 1;
+    // Post 'clear' to the worklet ring buffer — instant silence on the audio thread
+    workletNode.current?.port.postMessage({ type: 'clear' });
+
+    // Update agent speaking state immediately
+    setIsAgentSpeaking(false);
+    vad.current?.setAgentSpeaking(false);
   };
 
   useEffect(() => {
@@ -92,6 +93,27 @@ export default function Home() {
         () => { console.log('🔌 Disconnected'); setIsConnected(false); }
       );
 
+      // Initialize audio context and worklet for playback
+      const audioContextConstructor = window.AudioContext || (
+        window as Window & typeof globalThis & { webkitAudioContext?: typeof AudioContext }
+      ).webkitAudioContext;
+      if (!audioContextConstructor) {
+        throw new Error('Web Audio API is not supported in this browser');
+      }
+      const ctx = new audioContextConstructor({ sampleRate: 16000 });
+      audioContext.current = ctx;
+      await ctx.audioWorklet.addModule('/pcm-player-processor.js');
+
+      const worklet = new window.AudioWorkletNode(ctx, 'pcm-player-processor');
+      worklet.port.onmessage = (event: MessageEvent<{ type?: string; responseId?: number }>) => {
+        if (event.data.type === 'drained' && event.data.responseId === responseGeneration.current) {
+          setIsAgentSpeaking(false);
+          vad.current?.setAgentSpeaking(false);
+        }
+      };
+      worklet.connect(ctx.destination);
+      workletNode.current = worklet;
+
       audioCapture.current = new AudioCapture();
       audioSequence.current = 0;
       await audioCapture.current.initialize(
@@ -109,7 +131,6 @@ export default function Home() {
         }
       );
 
-      audioContext.current = new AudioContext({ sampleRate: 16000 });
       setIsRecording(true);
     } catch (err) {
       console.error('Failed to connect:', err);
@@ -120,6 +141,14 @@ export default function Home() {
   const disconnect = () => {
     audioCapture.current?.stop();
     wsClient.current?.disconnect();
+    if (workletNode.current) {
+      workletNode.current.disconnect();
+      workletNode.current = null;
+    }
+    if (audioContext.current) {
+      void audioContext.current.close();
+      audioContext.current = null;
+    }
     setIsRecording(false);
     setIsConnected(false);
   };
@@ -130,7 +159,11 @@ export default function Home() {
         setTranscript(typeof message.data === 'string' ? message.data : '');
         break;
       case 'audio':
-        if (typeof message.data === 'string') playAudioChunk(message.data);
+        if (typeof message.data === 'string' && typeof message.responseId === 'number') {
+          if (message.responseId === responseGeneration.current) {
+            scheduleAudioChunk(message.data, message.responseId);
+          }
+        }
         break;
       case 'latency':
         const latencyEvent = message.data;
@@ -144,12 +177,24 @@ export default function Home() {
       case 'status':
         if (!isRecord(message.data)) break;
         if (message.data.event === 'agent_speaking_start') {
+          const responseId = typeof message.data.responseId === 'number'
+            ? message.data.responseId
+            : message.responseId;
+          if (typeof responseId !== 'number') break;
+          if (responseId < responseGeneration.current) break;
+          responseGeneration.current = responseId;
           setIsAgentSpeaking(true);
           vad.current?.setAgentSpeaking(true);
           setResponse(typeof message.data.text === 'string' ? message.data.text : '');
         } else if (message.data.event === 'agent_speaking_end') {
-          setIsAgentSpeaking(false);
-          vad.current?.setAgentSpeaking(false);
+          const responseId = typeof message.data.responseId === 'number'
+            ? message.data.responseId
+            : message.responseId;
+          if (responseId !== responseGeneration.current) break;
+          workletNode.current?.port.postMessage({
+            type: 'response-end',
+            responseId,
+          });
         }
         break;
       case 'error':
@@ -160,35 +205,37 @@ export default function Home() {
     }
   };
 
-  const playAudioChunk = async (audioData: string) => {
-    if (!audioContext.current) return;
+  const scheduleAudioChunk = (base64Data: string, responseId: number) => {
+    if (!workletNode.current) return;
     try {
-      const binaryString = atob(audioData);
-      const bytes = new Uint8Array(binaryString.length);
-      for (let i = 0; i < binaryString.length; i++) {
+      // Decode base64 to raw PCM 16-bit bytes
+      const binaryString = atob(base64Data);
+      const len = binaryString.length;
+      const bytes = new Uint8Array(len);
+      for (let i = 0; i < len; i++) {
         bytes[i] = binaryString.charCodeAt(i);
       }
-      const audioBuffer = await audioContext.current.decodeAudioData(bytes.buffer as ArrayBuffer);
-      audioQueue.current.push(audioBuffer);
-      if (!isPlaying.current) playNextChunk();
-    } catch (err) {
-      console.error('Failed to play audio:', err);
-    }
-  };
 
-  const playNextChunk = () => {
-    if (audioQueue.current.length === 0) {
-      isPlaying.current = false;
-      return;
+      // Safely handle odd-length buffers (Deepgram stream can sometimes flush an odd number of bytes)
+      const evenLen = len % 2 === 0 ? len : len - 1;
+      const numSamples = evenLen / 2;
+
+      // Convert 16-bit PCM (Int16) to Float32 samples (-1.0 to 1.0)
+      const int16Array = new Int16Array(bytes.buffer, 0, numSamples);
+      const float32Array = new Float32Array(numSamples);
+      for (let i = 0; i < numSamples; i++) {
+        float32Array[i] = int16Array[i] / 32768.0;
+      }
+
+      // Feed directly into the AudioWorklet ring buffer
+      workletNode.current.port.postMessage({
+        type: 'samples',
+        samples: float32Array,
+        responseId,
+      }, [float32Array.buffer]);
+    } catch (err) {
+      console.error('Failed to schedule audio:', err);
     }
-    if (!audioContext.current) return;
-    isPlaying.current = true;
-    const buffer = audioQueue.current.shift()!;
-    const source = audioContext.current.createBufferSource();
-    source.buffer = buffer;
-    source.connect(audioContext.current.destination);
-    source.onended = () => playNextChunk();
-    source.start();
   };
 
   const float32ToInt16 = (float32Array: Float32Array): Int16Array => {
