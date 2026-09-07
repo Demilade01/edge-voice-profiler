@@ -46,7 +46,12 @@ export class LLMHandler {
         max_tokens: 250,
       });
 
-      const assistantMessage = completion.choices[0]?.message?.content || 'I apologize, but I could not generate a response.';
+      const rawAssistantMessage = completion.choices[0]?.message?.content || 'I apologize, but I could not generate a response.';
+      const assistantMessage = rawAssistantMessage
+        .replace(/["“”]/g, '')
+        .replace(/\*/g, '')
+        .replace(/[ \t]{2,}/g, ' ')
+        .trim();
 
       this.logger.logEvent({
         eventType: 'llm_response_received',

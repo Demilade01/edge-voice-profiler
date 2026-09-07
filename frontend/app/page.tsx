@@ -28,10 +28,14 @@ export default function Home() {
   const workletNode = useRef<AudioWorkletNode | null>(null);
   const activeTurnId = useRef<string | null>(null);
   const responseGeneration = useRef(0);
+  const pcmRemainder = useRef<Uint8Array>(new Uint8Array(0));
+  const pcmResponseId = useRef<number | null>(null);
   const audioSequence = useRef(0);
 
   const stopAgentAudio = () => {
     responseGeneration.current += 1;
+    pcmRemainder.current = new Uint8Array(0);
+    pcmResponseId.current = null;
     // Post 'clear' to the worklet ring buffer — instant silence on the audio thread
     workletNode.current?.port.postMessage({ type: 'clear' });
 
@@ -87,13 +91,11 @@ export default function Home() {
   const connect = async () => {
     try {
       setError(null);
-      await wsClient.current?.connect(
-        handleServerMessage,
-        () => { console.log('✅ Connected'); setIsConnected(true); },
-        () => { console.log('🔌 Disconnected'); setIsConnected(false); }
-      );
+      responseGeneration.current = 0;
+      pcmRemainder.current = new Uint8Array(0);
+      pcmResponseId.current = null;
 
-      // Initialize audio context and worklet for playback
+      // Create and resume playback from the user's Start button gesture.
       const audioContextConstructor = window.AudioContext || (
         window as Window & typeof globalThis & { webkitAudioContext?: typeof AudioContext }
       ).webkitAudioContext;
@@ -102,11 +104,38 @@ export default function Home() {
       }
       const ctx = new audioContextConstructor({ sampleRate: 16000 });
       audioContext.current = ctx;
+      await ctx.resume();
+      console.info('[audio] context initialized', {
+        state: ctx.state,
+        sampleRate: ctx.sampleRate,
+      });
+      if (ctx.state !== 'running') {
+        throw new Error(`Playback audio context is ${ctx.state}`);
+      }
+
+      await wsClient.current?.connect(
+        handleServerMessage,
+        () => { console.log('✅ Connected'); setIsConnected(true); },
+        () => { console.log('🔌 Disconnected'); setIsConnected(false); }
+      );
+
+      // Initialize audio context and worklet for playback
       await ctx.audioWorklet.addModule('/pcm-player-processor.js');
 
       const worklet = new window.AudioWorkletNode(ctx, 'pcm-player-processor');
-      worklet.port.onmessage = (event: MessageEvent<{ type?: string; responseId?: number }>) => {
-        if (event.data.type === 'drained' && event.data.responseId === responseGeneration.current) {
+      worklet.port.onmessage = (event: MessageEvent<{
+        type?: string;
+        responseId?: number;
+        samples?: number;
+        available?: number;
+        renderedSamples?: number;
+      }>) => {
+        if (event.data.type === 'queued') {
+          console.info('[audio] worklet queued', event.data);
+        } else if (event.data.type === 'underrun') {
+          console.warn('[audio] worklet underrun', event.data);
+        } else if (event.data.type === 'drained' && event.data.responseId === responseGeneration.current) {
+          console.info('[audio] worklet drained', event.data);
           setIsAgentSpeaking(false);
           vad.current?.setAgentSpeaking(false);
         }
@@ -161,7 +190,16 @@ export default function Home() {
       case 'audio':
         if (typeof message.data === 'string' && typeof message.responseId === 'number') {
           if (message.responseId === responseGeneration.current) {
+            console.info('[audio] chunk accepted', {
+              responseId: message.responseId,
+              base64Length: message.data.length,
+            });
             scheduleAudioChunk(message.data, message.responseId);
+          } else {
+            console.warn('[audio] chunk rejected: stale response', {
+              receivedResponseId: message.responseId,
+              currentResponseId: responseGeneration.current,
+            });
           }
         }
         break;
@@ -183,6 +221,8 @@ export default function Home() {
           if (typeof responseId !== 'number') break;
           if (responseId < responseGeneration.current) break;
           responseGeneration.current = responseId;
+          pcmRemainder.current = new Uint8Array(0);
+          pcmResponseId.current = responseId;
           setIsAgentSpeaking(true);
           vad.current?.setAgentSpeaking(true);
           setResponse(typeof message.data.text === 'string' ? message.data.text : '');
@@ -216,12 +256,30 @@ export default function Home() {
         bytes[i] = binaryString.charCodeAt(i);
       }
 
-      // Safely handle odd-length buffers (Deepgram stream can sometimes flush an odd number of bytes)
-      const evenLen = len % 2 === 0 ? len : len - 1;
+      if (pcmResponseId.current !== responseId) {
+        pcmRemainder.current = new Uint8Array(0);
+        pcmResponseId.current = responseId;
+      }
+
+      const combined = new Uint8Array(pcmRemainder.current.length + bytes.length);
+      combined.set(pcmRemainder.current);
+      combined.set(bytes, pcmRemainder.current.length);
+
+      const header = String.fromCharCode(...combined.subarray(0, 4));
+      if (header === 'RIFF') {
+        console.error('[audio] WAV header received in raw PCM stream', {
+          responseId,
+          byteLength: len,
+        });
+      }
+
+      // Keep an incomplete sample until the next network chunk arrives.
+      const evenLen = combined.length - (combined.length % 2);
+      pcmRemainder.current = combined.slice(evenLen);
       const numSamples = evenLen / 2;
 
       // Convert 16-bit PCM (Int16) to Float32 samples (-1.0 to 1.0)
-      const int16Array = new Int16Array(bytes.buffer, 0, numSamples);
+      const int16Array = new Int16Array(combined.buffer, combined.byteOffset, numSamples);
       const float32Array = new Float32Array(numSamples);
       for (let i = 0; i < numSamples; i++) {
         float32Array[i] = int16Array[i] / 32768.0;
@@ -233,6 +291,12 @@ export default function Home() {
         samples: float32Array,
         responseId,
       }, [float32Array.buffer]);
+      console.info('[audio] PCM enqueued', {
+        responseId,
+        byteLength: evenLen,
+        sampleCount: numSamples,
+        contextState: audioContext.current?.state,
+      });
     } catch (err) {
       console.error('Failed to schedule audio:', err);
     }
@@ -255,8 +319,7 @@ export default function Home() {
           Measure <span className="accent-italic">latency</span> at every hop
         </h1>
         <p className="text-lg text-gray-600 max-w-2xl">
-          A low-level voice infrastructure profiler that strips away abstractions
-          to measure exact millisecond costs under real-world network conditions.
+          A low-level voice infrastructure profiler.
         </p>
       </header>
 
@@ -303,8 +366,17 @@ export default function Home() {
             </div>
 
             {error && (
-              <div className="mt-4 p-4 bg-red-50 border border-red-200 rounded-lg text-red-700">
-                {error}
+              <div className="mt-4 flex items-center justify-between gap-3 p-4 bg-red-50 border border-red-200 rounded-lg text-red-700">
+                <span>{error}</span>
+                <button
+                  type="button"
+                  onClick={() => setError(null)}
+                  className="error-dismiss"
+                  aria-label="Dismiss error"
+                  title="Dismiss error"
+                >
+                  ×
+                </button>
               </div>
             )}
           </div>
@@ -339,6 +411,7 @@ export default function Home() {
         </div>
       </div>
 
+      {/*
       <div className="max-w-7xl mx-auto mt-12">
         <div className="dark-block">
           <h3 className="text-2xl font-bold mb-4">🌐 Network Stress Testing</h3>
@@ -351,6 +424,7 @@ export default function Home() {
           </ol>
         </div>
       </div>
+      */}
     </div>
   );
 }

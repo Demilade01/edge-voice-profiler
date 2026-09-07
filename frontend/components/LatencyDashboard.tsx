@@ -39,7 +39,7 @@ export default function LatencyDashboard({ events, summary, isRecording }: Laten
       </div>
 
       {/* Metrics Grid */}
-      <div className="grid grid-cols-2 md:grid-cols-5 gap-4 mb-8">
+      <div className="latency-metrics-grid mb-8">
         <div className="metric-card">
           <div className="metric-value">{metrics.transport.toFixed(0)}ms</div>
           <div className="metric-label">Transport</div>

@@ -23,6 +23,8 @@ class PCMPlayerProcessor extends AudioWorkletProcessor {
     this.responseId = null;
     this.responseEnded = false;
     this.hasQueuedAudio = false;
+    this.renderedSamples = 0;
+    this.wasUnderrunning = false;
 
     this.port.onmessage = (event) => {
       if (event.data.type === 'samples') {
@@ -40,6 +42,12 @@ class PCMPlayerProcessor extends AudioWorkletProcessor {
           this.readPos = this.writePos;
         }
         this.hasQueuedAudio = true;
+        this.port.postMessage({
+          type: 'queued',
+          responseId: this.responseId,
+          samples: samples.length,
+          available: this.available,
+        });
       } else if (event.data.type === 'response-end') {
         if (event.data.responseId === this.responseId) {
           this.responseEnded = true;
@@ -53,6 +61,7 @@ class PCMPlayerProcessor extends AudioWorkletProcessor {
         this.responseId = null;
         this.responseEnded = false;
         this.hasQueuedAudio = false;
+        this.wasUnderrunning = false;
         this.port.postMessage({ type: 'cleared' });
       }
     };
@@ -83,6 +92,17 @@ class PCMPlayerProcessor extends AudioWorkletProcessor {
     }
 
     this.available -= toRead;
+    this.renderedSamples += toRead;
+    const isUnderrunning = toRead < output.length;
+    if (isUnderrunning && !this.wasUnderrunning) {
+      this.port.postMessage({
+        type: 'underrun',
+        responseId: this.responseId,
+        available: this.available,
+        renderedSamples: this.renderedSamples,
+      });
+    }
+    this.wasUnderrunning = isUnderrunning;
     this.notifyIfDrained();
 
     // Return true to keep the processor alive indefinitely

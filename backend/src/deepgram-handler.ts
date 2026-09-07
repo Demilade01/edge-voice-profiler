@@ -111,7 +111,7 @@ export class DeepgramTTSHandler {
       metadata: { text },
     });
 
-    const url = 'https://api.deepgram.com/v1/speak?model=aura-asteria-en&encoding=linear16&sample_rate=16000';
+    const url = 'https://api.deepgram.com/v1/speak?model=aura-asteria-en&encoding=linear16&sample_rate=16000&container=none';
 
     const startTime = process.hrtime.bigint();
     let firstByteReceived = false;
@@ -124,21 +124,26 @@ export class DeepgramTTSHandler {
     // We flush every ~8000 bytes (~250ms of 16kHz/16bit mono audio).
     const CHUNK_THRESHOLD = 8000;
     let pendingPcm = Buffer.alloc(0);
+    let initialAudio = Buffer.alloc(0);
+    let streamFormatChecked = false;
     let chunkIndex = 0;
 
     const flushChunk = () => {
-      if (!isCurrentRequest() || pendingPcm.length === 0) return;
+      if (!isCurrentRequest() || pendingPcm.length < 2) return;
+
+      const sendLength = pendingPcm.length - (pendingPcm.length % 2);
+      const audioChunk = pendingPcm.subarray(0, sendLength);
+      pendingPcm = pendingPcm.subarray(sendLength);
 
       this.logger.logEvent({
         eventType: 'audio_chunk_sent_to_client',
         timestamp: process.hrtime.bigint(),
-        metadata: { chunkSize: pendingPcm.length, chunkIndex },
+        metadata: { chunkSize: audioChunk.length, chunkIndex },
       });
 
       // Send raw PCM bytes directly — no WAV wrapping
-      onChunk(pendingPcm);
+      onChunk(audioChunk);
       chunkIndex++;
-      pendingPcm = Buffer.alloc(0);
     };
 
     try {
@@ -176,6 +181,10 @@ export class DeepgramTTSHandler {
           flushChunk();
 
           console.log(`✅ TTS streaming completed (${chunkIndex} chunks sent)`);
+          if (pendingPcm.length === 1) {
+            console.warn('⚠️ Dropping incomplete final PCM byte');
+            pendingPcm = Buffer.alloc(0);
+          }
           if (isCurrentRequest()) onComplete();
           break;
         }
@@ -197,8 +206,29 @@ export class DeepgramTTSHandler {
           metadata: { audioChunkSize: value.length },
         });
 
+        let pcmChunk = Buffer.from(value);
+        if (!streamFormatChecked) {
+          initialAudio = Buffer.concat([initialAudio, pcmChunk]);
+          const isWav = initialAudio.subarray(0, 4).toString('ascii') === 'RIFF';
+
+          if (isWav) {
+            const dataMarker = initialAudio.indexOf(Buffer.from('data'), 12);
+            if (dataMarker === -1 || initialAudio.length < dataMarker + 8) {
+              continue;
+            }
+
+            pcmChunk = initialAudio.subarray(dataMarker + 8);
+            console.warn('⚠️ TTS returned WAV framing; stripped header before sending PCM');
+          } else {
+            pcmChunk = initialAudio;
+          }
+
+          initialAudio = Buffer.alloc(0);
+          streamFormatChecked = true;
+        }
+
         // Accumulate raw PCM and flush when we have enough
-        pendingPcm = Buffer.concat([pendingPcm, Buffer.from(value)]);
+        pendingPcm = Buffer.concat([pendingPcm, pcmChunk]);
         if (pendingPcm.length >= CHUNK_THRESHOLD) {
           flushChunk();
         }
