@@ -1,5 +1,12 @@
 export class VoiceActivityDetector {
-  private volumeThreshold: number = 15; // Percentage
+  private volumeThreshold: number = 7; // Percentage
+  private noiseFloor: number = 2;
+  private readonly noiseFloorSmoothing = 0.08;
+  private readonly speechToNoiseRatio = 2;
+  private readonly calibrationFrames = 8;
+  private readonly requiredSpeechFrames = 2;
+  private processedFrames = 0;
+  private speechCandidateFrames = 0;
   private silenceDuration: number = 1500; // ms
   private lastSpeechTime: number = 0;
   private isSpeaking: boolean = false;
@@ -28,9 +35,25 @@ export class VoiceActivityDetector {
 
   processVolume(volume: number): void {
     const now = Date.now();
+    this.processedFrames += 1;
 
-    if (volume > this.volumeThreshold) {
-      // Voice activity detected
+    if (this.processedFrames <= this.calibrationFrames) {
+      this.noiseFloor += (volume - this.noiseFloor) * this.noiseFloorSmoothing;
+      return;
+    }
+
+    const dynamicThreshold = Math.max(
+      this.volumeThreshold,
+      this.noiseFloor * this.speechToNoiseRatio
+    );
+
+    if (volume > dynamicThreshold) {
+      this.speechCandidateFrames += 1;
+
+      if (this.speechCandidateFrames < this.requiredSpeechFrames) {
+        return;
+      }
+
       this.lastSpeechTime = now;
 
       if (this.isAgentSpeaking && !this.hasBargedIn && this.onBargeIn) {
@@ -48,6 +71,9 @@ export class VoiceActivityDetector {
         }
       }
     } else {
+      this.speechCandidateFrames = 0;
+      this.noiseFloor += (volume - this.noiseFloor) * this.noiseFloorSmoothing;
+
       // Check for silence
       if (this.isSpeaking && now - this.lastSpeechTime > this.silenceDuration) {
         this.isSpeaking = false;
@@ -63,6 +89,8 @@ export class VoiceActivityDetector {
     this.isSpeaking = false;
     this.lastSpeechTime = 0;
     this.hasBargedIn = false;
+    this.processedFrames = 0;
+    this.speechCandidateFrames = 0;
   }
 
   getSpeakingState(): boolean {

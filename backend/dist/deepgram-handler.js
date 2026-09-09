@@ -19,6 +19,7 @@ class DeepgramSTTHandler {
             language: 'en-US',
             smart_format: true,
             interim_results: false,
+            endpointing: 500,
             punctuate: true,
             encoding: 'linear16',
             sample_rate: 16000,
@@ -33,7 +34,7 @@ class DeepgramSTTHandler {
         });
         this.connection.on(sdk_1.LiveTranscriptionEvents.Transcript, (data) => {
             const transcript = data.channel?.alternatives?.[0]?.transcript;
-            if (transcript && transcript.trim().length > 0) {
+            if (transcript && transcript.trim().length > 0 && data.speech_final) {
                 this.logger.logEvent({
                     eventType: 'deepgram_stt_response_received',
                     timestamp: process.hrtime.bigint(),
@@ -46,7 +47,14 @@ class DeepgramSTTHandler {
             }
         });
         this.connection.on(sdk_1.LiveTranscriptionEvents.Error, (error) => {
-            console.error('❌ Deepgram STT error:', error);
+            console.error('❌ Deepgram STT error:', {
+                type: error?.type,
+                message: error?.message,
+                code: error?.code,
+                reason: error?.reason,
+                data: error?.data,
+                readyState: this.connection?.getReadyState?.(),
+            });
         });
         this.connection.on(sdk_1.LiveTranscriptionEvents.Close, () => {
             console.log('🔌 Deepgram STT connection closed');
@@ -103,17 +111,19 @@ class DeepgramTTSHandler {
         let streamFormatChecked = false;
         let chunkIndex = 0;
         const flushChunk = () => {
-            if (!isCurrentRequest() || pendingPcm.length === 0)
+            if (!isCurrentRequest() || pendingPcm.length < 2)
                 return;
+            const sendLength = pendingPcm.length - (pendingPcm.length % 2);
+            const audioChunk = pendingPcm.subarray(0, sendLength);
+            pendingPcm = pendingPcm.subarray(sendLength);
             this.logger.logEvent({
                 eventType: 'audio_chunk_sent_to_client',
                 timestamp: process.hrtime.bigint(),
-                metadata: { chunkSize: pendingPcm.length, chunkIndex },
+                metadata: { chunkSize: audioChunk.length, chunkIndex },
             });
             // Send raw PCM bytes directly — no WAV wrapping
-            onChunk(pendingPcm);
+            onChunk(audioChunk);
             chunkIndex++;
-            pendingPcm = Buffer.alloc(0);
         };
         try {
             const response = await fetch(url, {
@@ -145,6 +155,10 @@ class DeepgramTTSHandler {
                     // Flush any remaining PCM data
                     flushChunk();
                     console.log(`✅ TTS streaming completed (${chunkIndex} chunks sent)`);
+                    if (pendingPcm.length === 1) {
+                        console.warn('⚠️ Dropping incomplete final PCM byte');
+                        pendingPcm = Buffer.alloc(0);
+                    }
                     if (isCurrentRequest())
                         onComplete();
                     break;

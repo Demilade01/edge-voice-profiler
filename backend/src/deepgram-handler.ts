@@ -21,6 +21,7 @@ export class DeepgramSTTHandler {
       language: 'en-US',
       smart_format: true,
       interim_results: false,
+      endpointing: 500,
       punctuate: true,
       encoding: 'linear16',
       sample_rate: 16000,
@@ -40,23 +41,30 @@ export class DeepgramSTTHandler {
     this.connection.on(LiveTranscriptionEvents.Transcript, (data: any) => {
       const transcript = data.channel?.alternatives?.[0]?.transcript;
 
-      if (transcript && transcript.trim().length > 0) {
-        this.logger.logEvent({
-          eventType: 'deepgram_stt_response_received',
-          timestamp: process.hrtime.bigint(),
-          metadata: { transcript, confidence: data.channel?.alternatives?.[0]?.confidence },
-        });
+      if (transcript && transcript.trim().length > 0 && data.speech_final) {
+          this.logger.logEvent({
+            eventType: 'deepgram_stt_response_received',
+            timestamp: process.hrtime.bigint(),
+            metadata: { transcript, confidence: data.channel?.alternatives?.[0]?.confidence },
+          });
 
-        console.log(`📝 Transcript: "${transcript}"`);
+          console.log(`📝 Transcript: "${transcript}"`);
 
-        if (this.onTranscriptCallback) {
-          this.onTranscriptCallback(transcript);
+          if (this.onTranscriptCallback) {
+            this.onTranscriptCallback(transcript);
+          }
         }
-      }
     });
 
     this.connection.on(LiveTranscriptionEvents.Error, (error: any) => {
-      console.error('❌ Deepgram STT error:', error);
+      console.error('❌ Deepgram STT error:', {
+        type: error?.type,
+        message: error?.message,
+        code: error?.code,
+        reason: error?.reason,
+        data: error?.data,
+        readyState: this.connection?.getReadyState?.(),
+      });
     });
 
     this.connection.on(LiveTranscriptionEvents.Close, () => {

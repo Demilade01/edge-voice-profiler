@@ -41,23 +41,23 @@ export default function LatencyDashboard({ events, summary, isRecording }: Laten
       {/* Metrics Grid */}
       <div className="latency-metrics-grid mb-8">
         <div className="metric-card">
-          <div className="metric-value">{metrics.transport.toFixed(0)}ms</div>
+          <div className="metric-value" title={`${metrics.transport.toFixed(0)}ms`}>{formatLatency(metrics.transport)}</div>
           <div className="metric-label">Transport</div>
         </div>
         <div className="metric-card">
-          <div className="metric-value">{metrics.stt.toFixed(0)}ms</div>
+          <div className="metric-value" title={`${metrics.stt.toFixed(0)}ms`}>{formatLatency(metrics.stt)}</div>
           <div className="metric-label">STT (Deepgram)</div>
         </div>
         <div className="metric-card">
-          <div className="metric-value">{metrics.llm.toFixed(0)}ms</div>
+          <div className="metric-value" title={`${metrics.llm.toFixed(0)}ms`}>{formatLatency(metrics.llm)}</div>
           <div className="metric-label">LLM (Groq)</div>
         </div>
         <div className="metric-card">
-          <div className="metric-value">{metrics.tts.toFixed(0)}ms</div>
+          <div className="metric-value" title={`${metrics.tts.toFixed(0)}ms`}>{formatLatency(metrics.tts)}</div>
           <div className="metric-label">TTS (Aura)</div>
         </div>
         <div className="metric-card">
-          <div className="metric-value">{metrics.total.toFixed(0)}ms</div>
+          <div className="metric-value" title={`${metrics.total.toFixed(0)}ms`}>{formatLatency(metrics.total)}</div>
           <div className="metric-label">Total Turn</div>
         </div>
       </div>
@@ -153,7 +153,7 @@ function formatEventName(eventType: string): string {
 }
 
 function formatDuration(durationMs?: number): string {
-  return typeof durationMs === 'number' ? `${durationMs.toFixed(0)}ms` : 'pending';
+  return typeof durationMs === 'number' ? formatLatency(durationMs) : 'pending';
 }
 
 interface WaterfallItemProps {
@@ -175,9 +175,16 @@ function WaterfallItem({ label, value, max, color }: WaterfallItemProps) {
           style={{ width: `${percentage}%` }}
         />
       </div>
-      <div className="waterfall-time">{value.toFixed(0)}ms</div>
+      <div className="waterfall-time" title={`${value.toFixed(0)}ms`}>{formatLatency(value)}</div>
     </div>
   );
+}
+
+function formatLatency(milliseconds: number): string {
+  if (!Number.isFinite(milliseconds)) return '—';
+  if (milliseconds < 1000) return `${milliseconds.toFixed(0)}ms`;
+  if (milliseconds < 60000) return `${(milliseconds / 1000).toFixed(1)}s`;
+  return `${(milliseconds / 60000).toFixed(1)}m`;
 }
 
 function getMetrics(events: LatencyEvent[], summary: LatencySummary | null): LatencyMetrics {
