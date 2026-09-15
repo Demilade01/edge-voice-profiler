@@ -26,6 +26,16 @@ export class VoiceActivityDetector {
     this.onBargeIn = onBargeIn || null;
   }
 
+  setCallbacks(
+    onSpeechStart?: () => void,
+    onSpeechEnd?: () => void,
+    onBargeIn?: () => void
+  ): void {
+    this.onSpeechStart = onSpeechStart || null;
+    this.onSpeechEnd = onSpeechEnd || null;
+    this.onBargeIn = onBargeIn || null;
+  }
+
   setAgentSpeaking(speaking: boolean): void {
     this.isAgentSpeaking = speaking;
     if (!speaking) {
