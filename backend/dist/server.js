@@ -8,6 +8,7 @@ const dotenv_1 = __importDefault(require("dotenv"));
 const express_1 = __importDefault(require("express"));
 const swagger_ui_express_1 = __importDefault(require("swagger-ui-express"));
 const openapi_1 = __importDefault(require("./openapi"));
+const keep_alive_1 = require("./keep-alive");
 const aethex_token_1 = require("./aethex-token");
 dotenv_1.default.config();
 const app = (0, express_1.default)();
@@ -79,6 +80,13 @@ app.post('/api/aethex-token', async (req, res) => {
         res.status(502).json({ error: 'Aethex token mint failed' });
     }
 });
-app.listen(port, () => {
+const httpServer = app.listen(port, () => {
     console.log(`Aethex profiler backend listening on http://localhost:${port}`);
 });
+const stopKeepAlive = (0, keep_alive_1.startKeepAlive)();
+function shutdown() {
+    stopKeepAlive();
+    httpServer.close(() => process.exit(0));
+}
+process.once('SIGINT', shutdown);
+process.once('SIGTERM', shutdown);

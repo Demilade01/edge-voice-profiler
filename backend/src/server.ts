@@ -3,6 +3,7 @@ import dotenv from 'dotenv';
 import express from 'express';
 import swaggerUi from 'swagger-ui-express';
 import openapiDocument from './openapi';
+import { startKeepAlive } from './keep-alive';
 import {
   AethexConfigurationError,
   AethexUpstreamError,
@@ -89,6 +90,16 @@ app.post('/api/aethex-token', async (req, res) => {
   }
 });
 
-app.listen(port, () => {
+const httpServer = app.listen(port, () => {
   console.log(`Aethex profiler backend listening on http://localhost:${port}`);
 });
+
+const stopKeepAlive = startKeepAlive();
+
+function shutdown(): void {
+  stopKeepAlive();
+  httpServer.close(() => process.exit(0));
+}
+
+process.once('SIGINT', shutdown);
+process.once('SIGTERM', shutdown);
