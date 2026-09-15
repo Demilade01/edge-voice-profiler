@@ -1,325 +1,286 @@
 'use client';
 
-import { useEffect, useRef, useState } from 'react';
-import { AudioCapture } from '@/lib/audio-capture';
-import { VoiceActivityDetector } from '@/lib/vad';
-import { WebSocketClient } from '@/lib/websocket-client';
-import { LatencyEvent, LatencySummary, ServerMessage } from '@/types';
-import LatencyDashboard from '@/components/LatencyDashboard';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import {
+  getTranscript,
+  PipelineMetrics,
+  WebRTCPlatform,
+  useAethexCall,
+  webPlatform,
+} from '@aethexai/react';
 import AudioVisualizer from '@/components/AudioVisualizer';
+import LatencyDashboard from '@/components/LatencyDashboard';
+import { LocalVadMonitor } from '@/lib/local-vad-monitor';
+import { VoiceActivityDetector } from '@/lib/vad';
+import { LatencyEvent } from '@/types';
+
+const backendUrl = process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:8080';
+const agentId = process.env.NEXT_PUBLIC_AETHEX_AGENT_ID || '';
+
+interface TurnState {
+  turnId: string;
+  startedAt: number;
+  speechEndAt?: number;
+  responseStartAt?: number;
+  firstAudioAt?: number;
+  finalizedTranscriptAt?: number;
+}
 
 export default function Home() {
-
-  const [isConnected, setIsConnected] = useState(false);
-  const [isRecording, setIsRecording] = useState(false);
-  const [isSpeaking, setIsSpeaking] = useState(false);
-  const [isAgentSpeaking, setIsAgentSpeaking] = useState(false);
-  const [volume, setVolume] = useState(0);
+  const [events, setEvents] = useState<LatencyEvent[]>([]);
   const [transcript, setTranscript] = useState('');
   const [response, setResponse] = useState('');
-  const [events, setEvents] = useState<LatencyEvent[]>([]);
-  const [summary, setSummary] = useState<LatencySummary | null>(null);
+  const [localVolume, setLocalVolume] = useState(0);
+  const [isLocallySpeaking, setIsLocallySpeaking] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const audioCapture = useRef<AudioCapture | null>(null);
-  const wsClient = useRef<WebSocketClient | null>(null);
-  const vad = useRef<VoiceActivityDetector | null>(null);
-  const audioContext = useRef<AudioContext | null>(null);
-  const workletNode = useRef<AudioWorkletNode | null>(null);
-  const activeTurnId = useRef<string | null>(null);
-  const responseGeneration = useRef(0);
-  const pcmRemainder = useRef<Uint8Array>(new Uint8Array(0));
-  const pcmResponseId = useRef<number | null>(null);
-  const audioSequence = useRef(0);
+  const sessionStartedAt = useRef<number | null>(null);
+  const turn = useRef<TurnState | null>(null);
+  const previousAgentSpeaking = useRef(false);
+  const interruptRef = useRef<() => void>(() => undefined);
+  const monitorRef = useRef<LocalVadMonitor | null>(null);
+  const localStreamRef = useRef<MediaStream | null>(null);
+  const sessionIdRef = useRef<string | null>(null);
 
-  const stopAgentAudio = () => {
-    responseGeneration.current += 1;
-    pcmRemainder.current = new Uint8Array(0);
-    pcmResponseId.current = null;
-    // Post 'clear' to the worklet ring buffer — instant silence on the audio thread
-    workletNode.current?.port.postMessage({ type: 'clear' });
-
-    // Update agent speaking state immediately
-    setIsAgentSpeaking(false);
-    vad.current?.setAgentSpeaking(false);
-  };
-
-  useEffect(() => {
-    const wsUrl = process.env.NEXT_PUBLIC_WS_URL || 'ws://localhost:8080';
-    wsClient.current = new WebSocketClient(wsUrl);
-
-    vad.current = new VoiceActivityDetector(
-      () => {
-        const turnId = `turn_${Date.now()}`;
-        activeTurnId.current = turnId;
-        setIsSpeaking(true);
-        wsClient.current?.sendMessage({
-          type: 'start',
-          turnId,
-          timestamp: performance.now(),
-        });
-      },
-      () => {
-        setIsSpeaking(false);
-        if (activeTurnId.current) {
-          wsClient.current?.sendMessage({
-            type: 'stop',
-            turnId: activeTurnId.current,
-            timestamp: performance.now(),
-          });
-          activeTurnId.current = null;
-        }
-      },
-      () => {
-        console.log('🛑 Barge-in triggered!');
-        stopAgentAudio();
-        wsClient.current?.sendMessage({
-          type: 'barge_in',
-          turnId: activeTurnId.current || undefined,
-          timestamp: performance.now(),
-        });
-      }
-    );
-
-    return () => {
-      audioCapture.current?.stop();
-      wsClient.current?.disconnect();
-      activeTurnId.current = null;
+  const logEvent = useCallback((
+    eventType: string,
+    metadata?: Record<string, unknown>,
+    eventTime = performance.now()
+  ) => {
+    const sessionTime = sessionStartedAt.current;
+    const turnStart = turn.current?.startedAt;
+    const event: LatencyEvent = {
+      eventType,
+      timestamp: new Date().toISOString(),
+      elapsedMs: sessionTime === null ? undefined : eventTime - sessionTime,
+      durationMs: turnStart === undefined ? undefined : eventTime - turnStart,
+      metadata,
     };
+
+    console.info(`[aethex-profiler] ${eventType}`, {
+      elapsedMs: event.elapsedMs,
+      durationMs: event.durationMs,
+      ...metadata,
+    });
+    setEvents((current) => [...current, event]);
   }, []);
 
-  const connect = async () => {
-    try {
-      setError(null);
-      responseGeneration.current = 0;
-      pcmRemainder.current = new Uint8Array(0);
-      pcmResponseId.current = null;
+  const getToken = useCallback(async (): Promise<string> => {
+    const tokenResponse = await fetch(`${backendUrl}/api/aethex-token`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: '{}',
+    });
+    const body = await tokenResponse.json() as {
+      token?: string;
+      error?: string;
+      detail?: string;
+    };
 
-      // Create and resume playback from the user's Start button gesture.
-      const audioContextConstructor = window.AudioContext || (
-        window as Window & typeof globalThis & { webkitAudioContext?: typeof AudioContext }
-      ).webkitAudioContext;
-      if (!audioContextConstructor) {
-        throw new Error('Web Audio API is not supported in this browser');
-      }
-      const ctx = new audioContextConstructor({ sampleRate: 16000 });
-      audioContext.current = ctx;
-      await ctx.resume();
-      console.info('[audio] context initialized', {
-        state: ctx.state,
-        sampleRate: ctx.sampleRate,
-      });
-      if (ctx.state !== 'running') {
-        throw new Error(`Playback audio context is ${ctx.state}`);
-      }
-
-      await wsClient.current?.connect(
-        handleServerMessage,
-        () => { console.log('✅ Connected'); setIsConnected(true); },
-        () => { console.log('🔌 Disconnected'); setIsConnected(false); }
-      );
-
-      // Initialize audio context and worklet for playback
-      await ctx.audioWorklet.addModule('/pcm-player-processor.js');
-
-      const worklet = new window.AudioWorkletNode(ctx, 'pcm-player-processor');
-      worklet.port.onmessage = (event: MessageEvent<{
-        type?: string;
-        responseId?: number;
-        samples?: number;
-        available?: number;
-        renderedSamples?: number;
-      }>) => {
-        if (event.data.type === 'queued') {
-          console.info('[audio] worklet queued', event.data);
-        } else if (event.data.type === 'underrun') {
-          console.warn('[audio] worklet underrun', event.data);
-        } else if (event.data.type === 'drained' && event.data.responseId === responseGeneration.current) {
-          console.info('[audio] worklet drained', event.data);
-          setIsAgentSpeaking(false);
-          vad.current?.setAgentSpeaking(false);
-        }
-      };
-      worklet.connect(ctx.destination);
-      workletNode.current = worklet;
-
-      audioCapture.current = new AudioCapture();
-      audioSequence.current = 0;
-      await audioCapture.current.initialize(
-        (audioData: Float32Array) => {
-          const buffer = float32ToInt16(audioData);
-          wsClient.current?.sendAudio(
-            buffer.buffer as ArrayBuffer,
-            audioSequence.current++,
-            performance.now()
-          );
-        },
-        (vol: number) => {
-          setVolume(vol);
-          vad.current?.processVolume(vol);
-        }
-      );
-
-      setIsRecording(true);
-    } catch (err) {
-      console.error('Failed to connect:', err);
-      setError('Failed to connect. Check microphone permissions.');
+    if (!tokenResponse.ok || !body.token) {
+      throw new Error(body.detail || body.error || `Token request failed (${tokenResponse.status})`);
     }
+    return body.token;
+  }, []);
+
+  const [detector] = useState(() => new VoiceActivityDetector());
+
+  // The platform is intentionally stable for the lifetime of the component;
+  // Aethex owns the actual microphone transport.
+  const platform = useMemo<WebRTCPlatform>(() => ({
+    ...webPlatform,
+    getUserMedia: async (constraints) => {
+      const stream = await webPlatform.getUserMedia(constraints);
+      localStreamRef.current = stream;
+      logEvent('microphone_permission_granted', {
+        audio_tracks: stream.getAudioTracks().length,
+      });
+
+      monitorRef.current?.stop();
+      monitorRef.current = new LocalVadMonitor(stream, {
+        detector,
+        onVolume: setLocalVolume,
+      });
+      return stream;
+    },
+  }), [detector, logEvent]);
+
+  const handleMetrics = useCallback((metrics: PipelineMetrics) => {
+    console.info('[aethex-profiler] pipeline-metrics', metrics);
+    const record = metrics as Record<string, unknown>;
+    const text = firstString(record, [
+      'finalized_transcript',
+      'transcript',
+      'user_transcript',
+      'assistant_text',
+      'response_text',
+    ]);
+
+    if (!text) return;
+    if (record.assistant_text || record.response_text) {
+      setResponse(text);
+    } else {
+      setTranscript(text);
+    }
+
+    if (!turn.current?.finalizedTranscriptAt && record.finalized_transcript) {
+      const now = performance.now();
+      turn.current!.finalizedTranscriptAt = now;
+      logEvent('finalized_transcription', { text }, now);
+    }
+  }, [logEvent]);
+
+  const {
+    isConnecting,
+    isConnected,
+    isSpeaking: agentSpeaking,
+    volume: agentVolume,
+    remoteStream,
+    sessionId,
+    error: callError,
+    start,
+    stop,
+    interrupt,
+  } = useAethexCall({
+    agentId,
+    getToken,
+    platform,
+    onConnected: () => logEvent('webrtc_connected'),
+    onEnded: async () => {
+      logEvent('session_ended');
+      const endedSessionId = sessionIdRef.current;
+      if (!endedSessionId) return;
+
+      try {
+        const transcriptToken = await getToken();
+        const turns = await getTranscript({
+          apiBaseUrl: 'https://api.aethexai.com/api/v1',
+          sessionId: endedSessionId,
+          headers: { Authorization: `Bearer ${transcriptToken}` },
+        });
+        const latestUserTurn = [...turns].reverse().find((item) => item.role === 'user');
+        const latestAssistantTurn = [...turns].reverse().find((item) => item.role === 'assistant');
+        if (latestUserTurn?.text) {
+          setTranscript(latestUserTurn.text);
+          if (!turn.current?.finalizedTranscriptAt) {
+            logEvent('finalized_transcription', { text: latestUserTurn.text });
+          }
+        }
+        if (latestAssistantTurn?.text) setResponse(latestAssistantTurn.text);
+      } catch (transcriptError) {
+        console.warn('[aethex-profiler] transcript unavailable after call', transcriptError);
+      }
+    },
+    onError: (aethexError) => {
+      console.error('[aethex-profiler] call error', aethexError);
+      setError(aethexError.message);
+    },
+    onMetrics: handleMetrics,
+  });
+
+  useEffect(() => {
+    interruptRef.current = interrupt;
+    detector.setCallbacks(
+      () => {
+        const now = performance.now();
+        if (!turn.current) {
+          turn.current = {
+            turnId: `turn_${Date.now()}`,
+            startedAt: now,
+          };
+        }
+        setIsLocallySpeaking(true);
+        logEvent('user_speech_start', { turn_id: turn.current.turnId }, now);
+      },
+      () => {
+        const now = performance.now();
+        if (turn.current) turn.current.speechEndAt = now;
+        setIsLocallySpeaking(false);
+        logEvent('user_speech_end', undefined, now);
+      },
+      () => {
+        const now = performance.now();
+        const responseMs = turn.current?.responseStartAt === undefined
+          ? undefined
+          : now - turn.current.responseStartAt;
+        interruptRef.current();
+        logEvent('barge_in_triggered', { response_ms: responseMs }, now);
+      },
+    );
+  }, [detector, interrupt, logEvent]);
+
+  useEffect(() => {
+    sessionIdRef.current = sessionId;
+  }, [sessionId]);
+
+  useEffect(() => {
+    detector.setAgentSpeaking(agentSpeaking);
+    if (agentSpeaking && !previousAgentSpeaking.current) {
+      const now = performance.now();
+      if (turn.current) {
+        turn.current.responseStartAt = now;
+        turn.current.firstAudioAt = now;
+      }
+      logEvent('first_remote_audio_activity', undefined, now);
+    } else if (!agentSpeaking && previousAgentSpeaking.current) {
+      logEvent('response_completed');
+      turn.current = null;
+    }
+    previousAgentSpeaking.current = agentSpeaking;
+  }, [agentSpeaking, detector, logEvent]);
+
+  useEffect(() => {
+    if (remoteStream) {
+      logEvent('remote_stream_received', {
+        audio_tracks: remoteStream.getAudioTracks().length,
+      });
+    }
+  }, [remoteStream, logEvent]);
+
+  useEffect(() => () => {
+    monitorRef.current?.stop();
+    localStreamRef.current?.getTracks().forEach((track) => track.stop());
+    stop();
+  }, [stop]);
+
+  const connect = async () => {
+    if (!agentId) {
+      setError('Missing NEXT_PUBLIC_AETHEX_AGENT_ID in frontend/.env.local');
+      return;
+    }
+
+    setError(null);
+    setEvents([]);
+    setTranscript('');
+    setResponse('');
+    const now = performance.now();
+    sessionStartedAt.current = now;
+    turn.current = null;
+    logEvent('session_start', undefined, now);
+    await start();
   };
 
   const disconnect = () => {
-    audioCapture.current?.stop();
-    wsClient.current?.disconnect();
-    if (workletNode.current) {
-      workletNode.current.disconnect();
-      workletNode.current = null;
-    }
-    if (audioContext.current) {
-      void audioContext.current.close();
-      audioContext.current = null;
-    }
-    setIsRecording(false);
-    setIsConnected(false);
+    monitorRef.current?.stop();
+    monitorRef.current = null;
+    localStreamRef.current = null;
+    detector.reset();
+    stop();
+    setIsLocallySpeaking(false);
   };
 
-  const handleServerMessage = (message: ServerMessage) => {
-    switch (message.type) {
-      case 'transcript':
-        setTranscript(typeof message.data === 'string' ? message.data : '');
-        break;
-      case 'audio':
-        if (typeof message.data === 'string' && typeof message.responseId === 'number') {
-          if (message.responseId === responseGeneration.current) {
-            console.info('[audio] chunk accepted', {
-              responseId: message.responseId,
-              base64Length: message.data.length,
-            });
-            scheduleAudioChunk(message.data, message.responseId);
-          } else {
-            console.warn('[audio] chunk rejected: stale response', {
-              receivedResponseId: message.responseId,
-              currentResponseId: responseGeneration.current,
-            });
-          }
-        }
-        break;
-      case 'latency':
-        const latencyEvent = message.data;
-        if (isLatencyEvent(latencyEvent)) {
-          setEvents((prev) => [...prev, latencyEvent]);
-        }
-        break;
-      case 'summary':
-        if (isLatencySummary(message.data)) setSummary(message.data);
-        break;
-      case 'status':
-        if (!isRecord(message.data)) break;
-        if (message.data.event === 'agent_speaking_start') {
-          const responseId = typeof message.data.responseId === 'number'
-            ? message.data.responseId
-            : message.responseId;
-          if (typeof responseId !== 'number') break;
-          if (responseId < responseGeneration.current) break;
-          responseGeneration.current = responseId;
-          pcmRemainder.current = new Uint8Array(0);
-          pcmResponseId.current = responseId;
-          setIsAgentSpeaking(true);
-          vad.current?.setAgentSpeaking(true);
-          setResponse(typeof message.data.text === 'string' ? message.data.text : '');
-        } else if (message.data.event === 'agent_speaking_end') {
-          const responseId = typeof message.data.responseId === 'number'
-            ? message.data.responseId
-            : message.responseId;
-          if (responseId !== responseGeneration.current) break;
-          workletNode.current?.port.postMessage({
-            type: 'response-end',
-            responseId,
-          });
-        }
-        break;
-      case 'error':
-        setError(isRecord(message.data) && typeof message.data.message === 'string'
-          ? message.data.message
-          : 'An error occurred');
-        break;
-    }
-  };
-
-  const scheduleAudioChunk = (base64Data: string, responseId: number) => {
-    if (!workletNode.current) return;
-    try {
-      // Decode base64 to raw PCM 16-bit bytes
-      const binaryString = atob(base64Data);
-      const len = binaryString.length;
-      const bytes = new Uint8Array(len);
-      for (let i = 0; i < len; i++) {
-        bytes[i] = binaryString.charCodeAt(i);
-      }
-
-      if (pcmResponseId.current !== responseId) {
-        pcmRemainder.current = new Uint8Array(0);
-        pcmResponseId.current = responseId;
-      }
-
-      const combined = new Uint8Array(pcmRemainder.current.length + bytes.length);
-      combined.set(pcmRemainder.current);
-      combined.set(bytes, pcmRemainder.current.length);
-
-      const header = String.fromCharCode(...combined.subarray(0, 4));
-      if (header === 'RIFF') {
-        console.error('[audio] WAV header received in raw PCM stream', {
-          responseId,
-          byteLength: len,
-        });
-      }
-
-      // Keep an incomplete sample until the next network chunk arrives.
-      const evenLen = combined.length - (combined.length % 2);
-      pcmRemainder.current = combined.slice(evenLen);
-      const numSamples = evenLen / 2;
-
-      // Convert 16-bit PCM (Int16) to Float32 samples (-1.0 to 1.0)
-      const int16Array = new Int16Array(combined.buffer, combined.byteOffset, numSamples);
-      const float32Array = new Float32Array(numSamples);
-      for (let i = 0; i < numSamples; i++) {
-        float32Array[i] = int16Array[i] / 32768.0;
-      }
-
-      // Feed directly into the AudioWorklet ring buffer
-      workletNode.current.port.postMessage({
-        type: 'samples',
-        samples: float32Array,
-        responseId,
-      }, [float32Array.buffer]);
-      console.info('[audio] PCM enqueued', {
-        responseId,
-        byteLength: evenLen,
-        sampleCount: numSamples,
-        contextState: audioContext.current?.state,
-      });
-    } catch (err) {
-      console.error('Failed to schedule audio:', err);
-    }
-  };
-
-  const float32ToInt16 = (float32Array: Float32Array): Int16Array => {
-    const int16Array = new Int16Array(float32Array.length);
-    for (let i = 0; i < float32Array.length; i++) {
-      const s = Math.max(-1, Math.min(1, float32Array[i]));
-      int16Array[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
-    }
-    return int16Array;
-  };
+  const isActive = isConnecting || isConnected;
+  const displayError = error || callError?.message || null;
 
   return (
     <div className="min-h-screen p-8">
       <header className="max-w-7xl mx-auto mb-12">
-        <div className="pill mb-4">⚡ Edge-Network Voice Profiler</div>
+        <div className="pill mb-4">⚡ Aethex Edge-Network Voice Profiler</div>
         <h1 className="display-heading mb-4">
           Measure <span className="accent-italic">latency</span> at every hop
         </h1>
         <p className="text-lg text-gray-600 max-w-2xl">
-          A low-level voice infrastructure profiler.
+          A WebRTC diagnostic profiler for Aethex conversational infrastructure.
         </p>
       </header>
 
@@ -327,47 +288,48 @@ export default function Home() {
         <div className="space-y-6">
           <div className="card">
             <div className="flex items-center justify-between mb-6">
-              <h2 className="text-2xl font-bold">Voice Interface</h2>
+              <h2 className="text-2xl font-bold">Aethex Voice Interface</h2>
               <div className="status-indicator">
                 <div className={`status-dot ${isConnected ? 'connected' : 'disconnected'}`} />
-                <span>{isConnected ? 'Connected' : 'Disconnected'}</span>
+                <span>{isConnecting ? 'Connecting' : isConnected ? 'Connected' : 'Disconnected'}</span>
               </div>
             </div>
 
             <div className="mb-6">
-              <AudioVisualizer volume={volume} isActive={isRecording} />
+              <AudioVisualizer
+                volume={isLocallySpeaking ? localVolume : agentVolume * 100}
+                isActive={isActive}
+              />
             </div>
 
             <div className="flex gap-4 mb-6">
-              {isSpeaking && (
+              {isLocallySpeaking && (
                 <div className="status-indicator">
                   <div className="status-dot speaking" />
                   <span>You&apos;re speaking</span>
                 </div>
               )}
-              {isAgentSpeaking && (
+              {agentSpeaking && (
                 <div className="status-indicator">
                   <div className="status-dot speaking" />
-                  <span>Agent speaking</span>
+                  <span>Aethex agent speaking</span>
                 </div>
               )}
             </div>
 
-            <div className="flex gap-4">
-              {!isRecording ? (
-                <button onClick={connect} className="btn-primary w-full">
-                  🎤 Start Voice Session
-                </button>
-              ) : (
-                <button onClick={disconnect} className="btn-secondary w-full">
-                  ⏹️ Stop Session
-                </button>
-              )}
-            </div>
+            {!isActive ? (
+              <button onClick={connect} className="btn-primary w-full">
+                🎤 Start Aethex Session
+              </button>
+            ) : (
+              <button onClick={disconnect} className="btn-secondary w-full">
+                ⏹️ Stop Session
+              </button>
+            )}
 
-            {error && (
+            {displayError && (
               <div className="mt-4 flex items-center justify-between gap-3 p-4 bg-red-50 border border-red-200 rounded-lg text-red-700">
-                <span>{error}</span>
+                <span>{displayError}</span>
                 <button
                   type="button"
                   onClick={() => setError(null)}
@@ -383,60 +345,37 @@ export default function Home() {
 
           <div className="card">
             <h3 className="text-xl font-bold mb-4">Conversation</h3>
-
             {transcript && (
               <div className="mb-4 p-4 bg-blue-50 rounded-lg">
                 <div className="text-sm font-semibold text-blue-700 mb-1">You said:</div>
                 <div className="text-gray-800">{transcript}</div>
               </div>
             )}
-
             {response && (
               <div className="p-4 bg-amber-50 rounded-lg">
-                <div className="text-sm font-semibold text-amber-700 mb-1">Agent response:</div>
+                <div className="text-sm font-semibold text-amber-700 mb-1">Aethex response:</div>
                 <div className="text-gray-800">{response}</div>
               </div>
             )}
-
             {!transcript && !response && (
               <div className="text-gray-400 text-center py-8">
-                Start speaking to see the conversation...
+                Start speaking to see metrics and conversation data...
               </div>
             )}
           </div>
         </div>
 
         <div>
-          <LatencyDashboard events={events} summary={summary} isRecording={isRecording} />
+          <LatencyDashboard events={events} isRecording={isActive} />
         </div>
       </div>
-
-      {/*
-      <div className="max-w-7xl mx-auto mt-12">
-        <div className="dark-block">
-          <h3 className="text-2xl font-bold mb-4">🌐 Network Stress Testing</h3>
-          <p className="mb-4 opacity-90">To test under degraded network conditions:</p>
-          <ol className="space-y-2 opacity-90">
-            <li>1. Open Chrome DevTools (F12)</li>
-            <li>2. Go to Network tab → Throttling</li>
-            <li>3. Select &quot;Slow 3G&quot; or &quot;Fast 3G&quot;</li>
-            <li>4. Watch how latency changes in real-time</li>
-          </ol>
-        </div>
-      </div>
-      */}
     </div>
   );
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null;
-}
-
-function isLatencyEvent(value: unknown): value is LatencyEvent {
-  return isRecord(value) && typeof value.eventType === 'string' && typeof value.timestamp === 'string';
-}
-
-function isLatencySummary(value: unknown): value is LatencySummary {
-  return isRecord(value) && typeof value.turnId === 'string';
+function firstString(record: Record<string, unknown>, keys: string[]): string | undefined {
+  for (const key of keys) {
+    if (typeof record[key] === 'string' && record[key]) return record[key];
+  }
+  return undefined;
 }
