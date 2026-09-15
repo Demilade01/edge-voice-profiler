@@ -1,5 +1,6 @@
 'use client';
 
+import { useMemo, useState } from 'react';
 import { LatencyEvent } from '@/types';
 
 interface LatencyDashboardProps {
@@ -8,60 +9,71 @@ interface LatencyDashboardProps {
 }
 
 interface LatencyMetrics {
-  permission: number;
   connection: number;
   transcription: number;
   ttfb: number;
   response: number;
+  bargeIn: number;
 }
 
 export default function LatencyDashboard({ events, isRecording }: LatencyDashboardProps) {
-  const metrics = getMetrics(events);
-  const maxLatency = Math.max(...Object.values(metrics), 100);
+  const [detailsOpen, setDetailsOpen] = useState(false);
+  const metrics = useMemo(() => getMetrics(events), [events]);
 
   return (
-    <div className="card">
-      <div className="flex items-center justify-between mb-6">
-        <h2 className="text-2xl font-bold">Aethex Latency Waterfall</h2>
-        {isRecording && <div className="pill"><span>🎙️ Live</span></div>}
+    <div className="profiler-panel glass-panel">
+      <div className="panel-heading profiler-heading">
+        <div>
+          <div className="section-kicker">DIAGNOSTIC WATERFALL</div>
+          <h2>Latency at every hop</h2>
+        </div>
+        <div className={`profiler-live ${isRecording ? 'is-active' : ''}`}>
+          <span />
+          {isRecording ? 'CAPTURING' : 'STANDBY'}
+        </div>
       </div>
 
-      <div className="latency-metrics-grid mb-8">
-        <Metric label="Mic permission" value={metrics.permission} />
-        <Metric label="WebRTC connect" value={metrics.connection} />
-        <Metric label="Transcription" value={metrics.transcription} />
-        <Metric label="Audio TTFB" value={metrics.ttfb} />
-        <Metric label="Response" value={metrics.response} />
+      <div className="metric-strip">
+        <Metric label="WebRTC connect" value={metrics.connection} accent="cyan" />
+        <Metric label="Transcription" value={metrics.transcription} accent="violet" />
+        <Metric label="Audio TTFB" value={metrics.ttfb} accent="green" />
+        <Metric label="Response" value={metrics.response} accent="cyan" />
+        <Metric label="Barge-in" value={metrics.bargeIn} accent="orange" />
       </div>
 
-      <div className="space-y-2">
-        <WaterfallItem label="Mic permission" value={metrics.permission} max={maxLatency} />
-        <WaterfallItem label="WebRTC connect" value={metrics.connection} max={maxLatency} />
-        <WaterfallItem label="Finalized transcription" value={metrics.transcription} max={maxLatency} />
-        <WaterfallItem label="First remote audio (TTFB)" value={metrics.ttfb} max={maxLatency} />
-        <WaterfallItem label="Response completion" value={metrics.response} max={maxLatency} />
-      </div>
+      <button
+        className="diagnostics-toggle"
+        onClick={() => setDetailsOpen((current) => !current)}
+        aria-expanded={detailsOpen}
+      >
+        <span>
+          <span className="toggle-icon">{detailsOpen ? '−' : '+'}</span>
+          {detailsOpen ? 'Hide event stream' : 'Open full event stream'}
+        </span>
+        <span className="diagnostics-count">{events.length} events</span>
+      </button>
 
-      {events.length > 0 && (
-        <div className="mt-6">
-          <div className="flex items-center justify-between mb-3">
-            <h3 className="text-lg font-bold">Event log</h3>
-            <span className="event-count">{events.length} captured</span>
+      {detailsOpen && (
+        <div className="diagnostics-body">
+          <div className="waterfall-list">
+            <WaterfallItem label="WebRTC connection" value={metrics.connection} max={maxMetric(metrics)} accent="cyan" />
+            <WaterfallItem label="Finalized transcription" value={metrics.transcription} max={maxMetric(metrics)} accent="violet" />
+            <WaterfallItem label="First remote audio / TTFB" value={metrics.ttfb} max={maxMetric(metrics)} accent="green" />
+            <WaterfallItem label="Response completion" value={metrics.response} max={maxMetric(metrics)} accent="cyan" />
+            <WaterfallItem label="Barge-in response" value={metrics.bargeIn} max={maxMetric(metrics)} accent="orange" />
           </div>
-          <div className="event-feed">
-            {events.slice(-12).reverse().map((event, index) => (
-              <div
-                key={`${event.timestamp}-${event.eventType}-${index}`}
-                className="event-row"
-              >
-                <span className="font-medium">{formatEventName(event.eventType)}</span>
-                <span className="text-gray-600">
-                  {formatLatency(event.elapsedMs)}{event.metadata?.response_ms !== undefined
-                    ? ` · response ${formatLatency(Number(event.metadata.response_ms))}`
-                    : ''}
-                </span>
-              </div>
-            ))}
+
+          <div className="event-stream">
+            {events.length === 0 ? (
+              <div className="event-empty">Start a session to capture browser timing events.</div>
+            ) : (
+              events.slice(-20).reverse().map((event, index) => (
+                <EventRow
+                  key={`${event.timestamp}-${event.eventType}-${index}`}
+                  event={event}
+                />
+              ))
+            )}
           </div>
         </div>
       )}
@@ -69,24 +81,60 @@ export default function LatencyDashboard({ events, isRecording }: LatencyDashboa
   );
 }
 
-function Metric({ label, value }: { label: string; value: number }): React.ReactNode {
+function Metric({
+  label,
+  value,
+  accent,
+}: {
+  label: string;
+  value: number;
+  accent: string;
+}) {
   return (
-    <div className="metric-card">
-      <div className="metric-value" title={`${value.toFixed(0)}ms`}>{formatLatency(value)}</div>
-      <div className="metric-label">{label}</div>
+    <div className={`profiler-metric metric-accent-${accent}`}>
+      <span className="profiler-metric-value">{formatLatency(value)}</span>
+      <span className="profiler-metric-label">{label}</span>
     </div>
   );
 }
 
-function WaterfallItem({ label, value, max }: { label: string; value: number; max: number }) {
-  const percentage = max > 0 ? (value / max) * 100 : 0;
+function WaterfallItem({
+  label,
+  value,
+  max,
+  accent,
+}: {
+  label: string;
+  value: number;
+  max: number;
+  accent: string;
+}) {
+  const percentage = max > 0 && value > 0 ? Math.max(3, (value / max) * 100) : 0;
   return (
-    <div className="waterfall-item">
-      <div className="waterfall-label">{label}</div>
-      <div className="waterfall-bar-container amber">
-        <div className="waterfall-bar-fill" style={{ width: `${percentage}%` }} />
+    <div className="waterfall-row">
+      <span className="waterfall-row-label">{label}</span>
+      <div className={`waterfall-track track-${accent}`}>
+        <span style={{ width: `${percentage}%` }} />
       </div>
-      <div className="waterfall-time" title={`${value.toFixed(0)}ms`}>{formatLatency(value)}</div>
+      <strong>{formatLatency(value)}</strong>
+    </div>
+  );
+}
+
+function EventRow({ event }: { event: LatencyEvent }) {
+  const severity = event.eventType.includes('barge')
+    ? 'warning'
+    : event.eventType.includes('error')
+      ? 'error'
+      : 'normal';
+  return (
+    <div className={`event-stream-row event-${severity}`}>
+      <span className="event-severity-dot" />
+      <span className="event-name">{formatEventName(event.eventType)}</span>
+      <span className="event-time">{formatLatency(event.elapsedMs)}</span>
+      {typeof event.metadata?.source === 'string' && (
+        <span className="event-source">{String(event.metadata.source)}</span>
+      )}
     </div>
   );
 }
@@ -98,14 +146,23 @@ function getMetrics(events: LatencyEvent[]): LatencyMetrics {
     return Math.max(0, to.elapsedMs - from.elapsedMs);
   };
   const session = first('session_start');
+  const speechEnd = first('user_speech_end');
+  const firstAudio = first('first_remote_audio_activity');
+
+  const bargeInEvent = events.find((event) => event.eventType === 'barge_in_triggered');
+  const bargeIn = bargeInEvent?.metadata?.response_ms;
 
   return {
-    permission: delta(session, first('microphone_permission_granted')),
     connection: delta(session, first('webrtc_connected')),
-    transcription: delta(first('user_speech_end'), first('finalized_transcription')),
-    ttfb: delta(first('user_speech_end'), first('first_remote_audio_activity')),
-    response: delta(first('first_remote_audio_activity'), first('response_completed')),
+    transcription: delta(speechEnd, first('finalized_transcription')),
+    ttfb: delta(speechEnd, firstAudio),
+    response: delta(firstAudio, first('response_completed')),
+    bargeIn: typeof bargeIn === 'number' ? bargeIn : 0,
   };
+}
+
+function maxMetric(metrics: LatencyMetrics): number {
+  return Math.max(...Object.values(metrics), 100);
 }
 
 function formatEventName(eventType: string): string {
@@ -113,7 +170,9 @@ function formatEventName(eventType: string): string {
 }
 
 function formatLatency(milliseconds?: number): string {
-  if (typeof milliseconds !== 'number' || !Number.isFinite(milliseconds)) return 'pending';
+  if (typeof milliseconds !== 'number' || !Number.isFinite(milliseconds) || milliseconds <= 0) {
+    return '—';
+  }
   if (milliseconds < 1000) return `${milliseconds.toFixed(0)}ms`;
   if (milliseconds < 60000) return `${(milliseconds / 1000).toFixed(1)}s`;
   return `${(milliseconds / 60000).toFixed(1)}m`;

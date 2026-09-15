@@ -8,7 +8,7 @@ import {
   useAethexCall,
   webPlatform,
 } from '@aethexai/react';
-import AudioVisualizer from '@/components/AudioVisualizer';
+import AudioVisualizer, { VisualizerPhase } from '@/components/AudioVisualizer';
 import LatencyDashboard from '@/components/LatencyDashboard';
 import { LocalVadMonitor } from '@/lib/local-vad-monitor';
 import { VoiceActivityDetector } from '@/lib/vad';
@@ -26,6 +26,8 @@ interface TurnState {
   finalizedTranscriptAt?: number;
 }
 
+type SessionPhase = VisualizerPhase;
+
 export default function Home() {
   const [events, setEvents] = useState<LatencyEvent[]>([]);
   const [transcript, setTranscript] = useState('');
@@ -33,6 +35,8 @@ export default function Home() {
   const [localVolume, setLocalVolume] = useState(0);
   const [isLocallySpeaking, setIsLocallySpeaking] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [bargeInVisible, setBargeInVisible] = useState(false);
+  const [showConnectionDetails, setShowConnectionDetails] = useState(false);
 
   const sessionStartedAt = useRef<number | null>(null);
   const turn = useRef<TurnState | null>(null);
@@ -41,6 +45,7 @@ export default function Home() {
   const monitorRef = useRef<LocalVadMonitor | null>(null);
   const localStreamRef = useRef<MediaStream | null>(null);
   const sessionIdRef = useRef<string | null>(null);
+  const bargeInTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const logEvent = useCallback((
     eventType: string,
@@ -65,6 +70,12 @@ export default function Home() {
     setEvents((current) => [...current, event]);
   }, []);
 
+  const showBargeIn = useCallback(() => {
+    setBargeInVisible(true);
+    if (bargeInTimerRef.current) clearTimeout(bargeInTimerRef.current);
+    bargeInTimerRef.current = setTimeout(() => setBargeInVisible(false), 1600);
+  }, []);
+
   const getToken = useCallback(async (): Promise<string> => {
     const tokenResponse = await fetch(`${backendUrl}/api/aethex-token`, {
       method: 'POST',
@@ -85,8 +96,6 @@ export default function Home() {
 
   const [detector] = useState(() => new VoiceActivityDetector());
 
-  // The platform is intentionally stable for the lifetime of the component;
-  // Aethex owns the actual microphone transport.
   const platform = useMemo<WebRTCPlatform>(() => ({
     ...webPlatform,
     getUserMedia: async (constraints) => {
@@ -133,6 +142,7 @@ export default function Home() {
   const {
     isConnecting,
     isConnected,
+    isMuted,
     isSpeaking: agentSpeaking,
     volume: agentVolume,
     remoteStream,
@@ -141,6 +151,8 @@ export default function Home() {
     start,
     stop,
     interrupt,
+    setMuted,
+    setOutputVolume,
   } = useAethexCall({
     agentId,
     getToken,
@@ -204,10 +216,11 @@ export default function Home() {
           ? undefined
           : now - turn.current.responseStartAt;
         interruptRef.current();
-        logEvent('barge_in_triggered', { response_ms: responseMs }, now);
+        showBargeIn();
+        logEvent('barge_in_triggered', { response_ms: responseMs, source: 'vad' }, now);
       },
     );
-  }, [detector, interrupt, logEvent]);
+  }, [detector, interrupt, logEvent, showBargeIn]);
 
   useEffect(() => {
     sessionIdRef.current = sessionId;
@@ -240,6 +253,7 @@ export default function Home() {
   useEffect(() => () => {
     monitorRef.current?.stop();
     localStreamRef.current?.getTracks().forEach((track) => track.stop());
+    if (bargeInTimerRef.current) clearTimeout(bargeInTimerRef.current);
     stop();
   }, [stop]);
 
@@ -253,6 +267,7 @@ export default function Home() {
     setEvents([]);
     setTranscript('');
     setResponse('');
+    setBargeInVisible(false);
     const now = performance.now();
     sessionStartedAt.current = now;
     turn.current = null;
@@ -267,108 +282,279 @@ export default function Home() {
     detector.reset();
     stop();
     setIsLocallySpeaking(false);
+    setBargeInVisible(false);
+  };
+
+  const manualInterrupt = () => {
+    if (!agentSpeaking) return;
+    const now = performance.now();
+    const responseMs = turn.current?.responseStartAt === undefined
+      ? undefined
+      : now - turn.current.responseStartAt;
+    interrupt();
+    showBargeIn();
+    logEvent('barge_in_triggered', { response_ms: responseMs, source: 'manual' }, now);
   };
 
   const isActive = isConnecting || isConnected;
   const displayError = error || callError?.message || null;
+  const phase: SessionPhase = displayError
+    ? 'error'
+    : bargeInVisible
+      ? 'barge-in'
+      : isConnecting
+        ? 'connecting'
+        : agentSpeaking
+          ? 'agent-speaking'
+          : isLocallySpeaking
+            ? 'user-speaking'
+            : isConnected
+              ? 'listening'
+              : 'idle';
+
+  const statusLabel = {
+    idle: 'Ready for session',
+    connecting: 'Establishing secure WebRTC link',
+    listening: 'Listening for your voice',
+    'user-speaking': 'Your voice is live',
+    'agent-speaking': 'Aethex is responding',
+    'barge-in': 'Response interrupted',
+    error: 'Connection needs attention',
+  }[phase];
 
   return (
-    <div className="min-h-screen p-8">
-      <header className="max-w-7xl mx-auto mb-12">
-        <div className="pill mb-4">⚡ Aethex Edge-Network Voice Profiler</div>
-        <h1 className="display-heading mb-4">
-          Measure <span className="accent-italic">latency</span> at every hop
-        </h1>
-        <p className="text-lg text-gray-600 max-w-2xl">
-          A WebRTC diagnostic profiler for Aethex conversational infrastructure.
-        </p>
+    <main className="observatory-shell">
+      <div className="observatory-grid" aria-hidden="true" />
+      <header className="topbar page-width">
+        <div className="brand-lockup">
+          <div className="brand-mark"><span /></div>
+          <div>
+            <div className="eyebrow">AETHEX / EDGE OBSERVATORY</div>
+            <div className="brand-title">Voice Profiler</div>
+          </div>
+        </div>
+        <div className="topbar-meta">
+          <span className={`health-dot ${isConnected ? 'is-live' : ''}`} />
+          <span>{isConnected ? 'WebRTC live' : isConnecting ? 'Connecting' : 'Offline'}</span>
+          <span className="topbar-divider" />
+          <span className="mono-text">AGENT {agentId ? agentId.slice(0, 8).toUpperCase() : 'UNSET'}</span>
+        </div>
       </header>
 
-      <div className="max-w-7xl mx-auto grid grid-cols-1 lg:grid-cols-2 gap-8">
-        <div className="space-y-6">
-          <div className="card">
-            <div className="flex items-center justify-between mb-6">
-              <h2 className="text-2xl font-bold">Aethex Voice Interface</h2>
-              <div className="status-indicator">
-                <div className={`status-dot ${isConnected ? 'connected' : 'disconnected'}`} />
-                <span>{isConnecting ? 'Connecting' : isConnected ? 'Connected' : 'Disconnected'}</span>
-              </div>
-            </div>
+      <section className="hero page-width">
+        <div className="hero-copy">
+          <div className="section-kicker">REAL-TIME VOICE INFRASTRUCTURE</div>
+          <h1>Hear the edge.<br /><span>Measure every millisecond.</span></h1>
+          <p>
+            A live diagnostic console for conversational voice performance,
+            routed directly through Aethex WebRTC.
+          </p>
+        </div>
+        <div className="hero-signal" aria-hidden="true">
+          <span className="signal-line signal-line-one" />
+          <span className="signal-line signal-line-two" />
+          <span className="signal-line signal-line-three" />
+          <span className="signal-caption">LOW-LATENCY AUDIO PATH</span>
+        </div>
+      </section>
 
-            <div className="mb-6">
+      <section className="page-width console-layout">
+        <div className="voice-console glass-panel">
+          <div className="panel-heading">
+            <div>
+              <div className="section-kicker">LIVE SESSION</div>
+              <h2>Aethex voice channel</h2>
+            </div>
+            <div className={`state-chip state-${phase}`}>
+              <span className="state-chip-dot" />
+              {statusLabel}
+            </div>
+          </div>
+
+          <div className={`voice-stage phase-${phase}`}>
+            <div className="orb-halo orb-halo-outer" />
+            <div className="orb-halo orb-halo-inner" />
+            <div className="orb-core">
               <AudioVisualizer
                 volume={isLocallySpeaking ? localVolume : agentVolume * 100}
                 isActive={isActive}
+                phase={phase}
               />
             </div>
+            <div className="stage-readout">
+              <span className="stage-readout-label">{phase === 'agent-speaking' ? 'REMOTE AUDIO' : 'MIC INPUT'}</span>
+              <span className="stage-readout-value">{Math.round((isLocallySpeaking ? localVolume : agentVolume * 100))}%</span>
+            </div>
+            {bargeInVisible && <div className="interrupt-flash">BARGE-IN / AUDIO QUEUE CLEARED</div>}
+          </div>
 
-            <div className="flex gap-4 mb-6">
-              {isLocallySpeaking && (
-                <div className="status-indicator">
-                  <div className="status-dot speaking" />
-                  <span>You&apos;re speaking</span>
-                </div>
-              )}
-              {agentSpeaking && (
-                <div className="status-indicator">
-                  <div className="status-dot speaking" />
-                  <span>Aethex agent speaking</span>
+          <div className="session-status-row">
+            <div className="status-detail">
+              <span className="status-icon status-icon-mic">◎</span>
+              <div>
+                <span className="status-detail-label">Microphone</span>
+                <strong>{isMuted ? 'Muted' : isLocallySpeaking ? 'Transmitting' : 'Ready'}</strong>
+              </div>
+            </div>
+            <div className="status-detail">
+              <span className="status-icon status-icon-audio">◉</span>
+              <div>
+                <span className="status-detail-label">Audio route</span>
+                <strong>{agentSpeaking ? 'Aethex WebRTC' : 'Standing by'}</strong>
+              </div>
+            </div>
+            <div className="quality-badge">
+              <span className="quality-bars"><i /><i /><i /><i /></span>
+              Clean edge path
+            </div>
+          </div>
+
+          <div className="console-controls">
+            {!isActive ? (
+              <button onClick={connect} className="primary-action" aria-label="Start Aethex voice session">
+                <span className="action-icon">✦</span>
+                <span>Start voice session</span>
+                <span className="action-arrow">→</span>
+              </button>
+            ) : (
+              <button onClick={disconnect} className="stop-action" aria-label="Stop Aethex voice session">
+                <span className="stop-icon">■</span>
+                <span>End session</span>
+              </button>
+            )}
+            <div className="secondary-controls">
+              <button
+                className={`icon-control ${isMuted ? 'control-active' : ''}`}
+                onClick={() => setMuted(!isMuted)}
+                disabled={!isActive}
+                aria-label={isMuted ? 'Unmute microphone' : 'Mute microphone'}
+                title={isMuted ? 'Unmute microphone' : 'Mute microphone'}
+              >
+                {isMuted ? '◌' : '◎'}
+                <span>{isMuted ? 'Unmute' : 'Mute'}</span>
+              </button>
+              <button
+                className={`icon-control ${agentSpeaking ? 'control-active interrupt-control' : ''}`}
+                onClick={manualInterrupt}
+                disabled={!agentSpeaking}
+                aria-label="Interrupt Aethex response"
+                title="Interrupt Aethex response"
+              >
+                ↯
+                <span>Interrupt</span>
+              </button>
+              <label className="volume-control">
+                <span aria-hidden="true">◖</span>
+                <input
+                  type="range"
+                  min="0"
+                  max="1"
+                  step="0.01"
+                  defaultValue="1"
+                  onChange={(event) => setOutputVolume(Number(event.target.value))}
+                  aria-label="Aethex output volume"
+                />
+                <span aria-hidden="true">◕</span>
+              </label>
+            </div>
+          </div>
+
+          {displayError && (
+            <div className="error-banner" role="alert">
+              <span className="error-symbol">!</span>
+              <span>{displayError}</span>
+              <button type="button" onClick={() => setError(null)} aria-label="Dismiss error">×</button>
+            </div>
+          )}
+        </div>
+
+        <aside className="side-stack">
+          <div className="conversation-panel glass-panel">
+            <div className="panel-heading compact-heading">
+              <div>
+                <div className="section-kicker">CONVERSATION TRACE</div>
+                <h2>Live exchange</h2>
+              </div>
+              <span className="live-pulse-label"><i /> LIVE</span>
+            </div>
+            <div className="conversation-feed">
+              <ConversationBubble role="user" text={transcript} pending={!transcript && isLocallySpeaking} />
+              <ConversationBubble role="agent" text={response} pending={!response && agentSpeaking} />
+              {!transcript && !response && !isLocallySpeaking && !agentSpeaking && (
+                <div className="empty-conversation">
+                  <span className="empty-orbit">◌</span>
+                  <span>Speak naturally to begin the trace.</span>
                 </div>
               )}
             </div>
+          </div>
 
-            {!isActive ? (
-              <button onClick={connect} className="btn-primary w-full">
-                🎤 Start Aethex Session
-              </button>
-            ) : (
-              <button onClick={disconnect} className="btn-secondary w-full">
-                ⏹️ Stop Session
-              </button>
-            )}
-
-            {displayError && (
-              <div className="mt-4 flex items-center justify-between gap-3 p-4 bg-red-50 border border-red-200 rounded-lg text-red-700">
-                <span>{displayError}</span>
-                <button
-                  type="button"
-                  onClick={() => setError(null)}
-                  className="error-dismiss"
-                  aria-label="Dismiss error"
-                  title="Dismiss error"
-                >
-                  ×
-                </button>
+          <div className="connection-panel glass-panel">
+            <button
+              className="connection-toggle"
+              onClick={() => setShowConnectionDetails((current) => !current)}
+              aria-expanded={showConnectionDetails}
+            >
+              <span>
+                <span className="section-kicker">TRANSPORT</span>
+                <strong>Aethex WebRTC link</strong>
+              </span>
+              <span className="connection-toggle-right">
+                <span className={`connection-status ${isConnected ? 'connected' : ''}`}>
+                  {isConnected ? 'SECURE / ACTIVE' : isConnecting ? 'NEGOTIATING' : 'IDLE'}
+                </span>
+                <span className="chevron">{showConnectionDetails ? '⌃' : '⌄'}</span>
+              </span>
+            </button>
+            {showConnectionDetails && (
+              <div className="connection-details">
+                <div><span>Session</span><strong className="mono-text">{sessionId || 'Not started'}</strong></div>
+                <div><span>Remote audio</span><strong>{remoteStream ? 'Attached' : 'Waiting'}</strong></div>
+                <div><span>Playback</span><strong>SDK-managed</strong></div>
               </div>
             )}
           </div>
+        </aside>
+      </section>
 
-          <div className="card">
-            <h3 className="text-xl font-bold mb-4">Conversation</h3>
-            {transcript && (
-              <div className="mb-4 p-4 bg-blue-50 rounded-lg">
-                <div className="text-sm font-semibold text-blue-700 mb-1">You said:</div>
-                <div className="text-gray-800">{transcript}</div>
-              </div>
-            )}
-            {response && (
-              <div className="p-4 bg-amber-50 rounded-lg">
-                <div className="text-sm font-semibold text-amber-700 mb-1">Aethex response:</div>
-                <div className="text-gray-800">{response}</div>
-              </div>
-            )}
-            {!transcript && !response && (
-              <div className="text-gray-400 text-center py-8">
-                Start speaking to see metrics and conversation data...
-              </div>
-            )}
-          </div>
-        </div>
+      <section className="page-width profiler-section">
+        <LatencyDashboard events={events} isRecording={isActive} />
+      </section>
 
-        <div>
-          <LatencyDashboard events={events} isRecording={isActive} />
-        </div>
+      <footer className="page-width footer-bar">
+        <span>AETHEX VOICE INFRASTRUCTURE</span>
+        <span className="footer-rule" />
+        <span className="mono-text">DIAGNOSTIC MODE / BROWSER TIMING</span>
+      </footer>
+    </main>
+  );
+}
+
+function ConversationBubble({
+  role,
+  text,
+  pending,
+}: {
+  role: 'user' | 'agent';
+  text: string;
+  pending: boolean;
+}) {
+  if (!text && !pending) return null;
+  const isUser = role === 'user';
+  return (
+    <div className={`conversation-bubble ${isUser ? 'bubble-user' : 'bubble-agent'}`}>
+      <div className="bubble-meta">
+        <span className="bubble-avatar">{isUser ? 'YOU' : 'AI'}</span>
+        <span>{isUser ? 'Your voice' : 'Aethex agent'}</span>
+        <span className="bubble-line" />
       </div>
+      {pending ? (
+        <div className="typing-dots" aria-label="Waiting for transcript">
+          <i /><i /><i />
+        </div>
+      ) : (
+        <p>{text}</p>
+      )}
     </div>
   );
 }
