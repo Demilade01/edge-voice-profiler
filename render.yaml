@@ -1,0 +1,23 @@
+services:
+  - type: web
+    name: aethex-voice-profiler-backend
+    runtime: node
+    rootDir: backend
+    buildCommand: npm ci --include=dev && npm run build
+    startCommand: npm start
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_VERSION
+        value: 24.14.1
+      - key: NODE_ENV
+        value: production
+      - key: AETHEX_API_KEY
+        sync: false
+      - key: AETHEX_AGENT_ID
+        sync: false
+      - key: AETHEX_API_BASE_URL
+        value: https://api.aethexai.com/api/v1
+      - key: KEEP_ALIVE_ENABLED
+        value: "true"
+      - key: KEEP_ALIVE_INTERVAL_MS
+        value: "600000"
