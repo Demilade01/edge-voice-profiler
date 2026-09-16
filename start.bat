@@ -1,6 +1,6 @@
 @echo off
 echo ================================
-echo Voice Latency Profiler - Startup
+echo Aethex WebRTC Voice Profiler - Startup
 echo ================================
 echo.
 
@@ -8,8 +8,8 @@ REM Check if .env files exist
 if not exist "backend\.env" (
     echo [ERROR] backend\.env not found!
     echo Please create backend\.env with:
-    echo   DEEPGRAM_API_KEY=your_key
-    echo   GROQ_API_KEY=your_key
+    echo   AETHEX_API_KEY=ae_live_your_key
+    echo   AETHEX_AGENT_ID=your_agent_uuid
     echo   PORT=8080
     echo.
     pause
@@ -18,7 +18,8 @@ if not exist "backend\.env" (
 
 if not exist "frontend\.env.local" (
     echo [INFO] Creating frontend\.env.local...
-    echo NEXT_PUBLIC_WS_URL=ws://localhost:8080 > frontend\.env.local
+    echo NEXT_PUBLIC_BACKEND_URL=http://localhost:8080 > frontend\.env.local
+    echo NEXT_PUBLIC_AETHEX_AGENT_ID=your_agent_uuid >> frontend\.env.local
     echo Created frontend\.env.local
     echo.
 )
