@@ -317,10 +317,22 @@ Recommended service settings:
 
 ```text
 Root directory: backend
-Build command: npm install && npm run build
+Build command: npm ci --include=dev && npm run build
 Start command: npm start
 Health check path: /health
 ```
+
+Do not configure the Render build command as only `npm run build`. Render must
+install the backend dependencies and dev dependencies first; otherwise the
+compiler may fall back to a globally available TypeScript binary and report
+missing Node types, `fetch`, Express types, or installed packages.
+
+Use `npm ci --include=dev` because TypeScript, `tsx`, and the Node/Express type
+packages are development dependencies required during compilation, even when
+the service runs with `NODE_ENV=production`.
+
+This repository also includes `render.yaml` with the same service settings.
+Use it as a Blueprint or copy its values into the Render dashboard.
 
 Required Render environment variables:
 
